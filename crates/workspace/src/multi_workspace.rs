@@ -2,9 +2,9 @@ use anyhow::Result;
 use fs::Fs;
 
 use gpui::{
-    AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    Action, AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity,
+    Window, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -19,6 +19,7 @@ use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
 use zed_actions::agents_sidebar::ToggleThreadSwitcher;
+use zed_actions::assistant::OpenAgentPage;
 
 use agent_settings::AgentSettings;
 use settings::SidebarDockPosition;
@@ -2097,8 +2098,9 @@ impl Render for MultiWorkspace {
                 .on_action(cx.listener(Self::close_window))
                 .when(self.multi_workspace_enabled(cx), |this| {
                     this.on_action(cx.listener(
-                        |this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
-                            this.toggle_sidebar(window, cx);
+                        |_this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
+                            // Fork: default AI entry is Agent page, not threads sidebar.
+                            window.dispatch_action(OpenAgentPage.boxed_clone(), cx);
                         },
                     ))
                     .on_action(cx.listener(
@@ -2107,8 +2109,8 @@ impl Render for MultiWorkspace {
                         },
                     ))
                     .on_action(cx.listener(
-                        |this: &mut Self, _: &FocusWorkspaceSidebar, window, cx| {
-                            this.focus_sidebar(window, cx);
+                        |_this: &mut Self, _: &FocusWorkspaceSidebar, window, cx| {
+                            window.dispatch_action(OpenAgentPage.boxed_clone(), cx);
                         },
                     ))
                     .on_action(cx.listener(

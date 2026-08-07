@@ -11,6 +11,9 @@ See the platform-specific instructions for building Zed from source:
 - [Linux](./development/linux.md)
 - [Windows](./development/windows.md)
 
+> **本仓库说明：** 相对上游已剔除协作服务端、通话 / LiveKit、自动更新与部分工具
+> crate。中文说明见 [本仓库精简说明（个人 Fork）](./development/fork-strip.zh.md)。
+
 ## Keychain access
 
 Zed stores secrets in the system keychain.
@@ -82,9 +85,11 @@ The `script/histogram` tool can accept as many measurement files as you like and
 
 ### Using `util_macros::perf`
 
-For benchmarking unit tests, annotate them with the `#[perf]` attribute from the `util_macros` crate. Then run `cargo
-perf-test -p $CRATE` to benchmark them. See the rustdoc documentation on `crates/util_macros` and `tooling/perf` for
-in-depth examples and explanations.
+For benchmarking unit tests, annotate them with the `#[perf]` attribute from the
+`util_macros` crate. This fork keeps the `tooling/perf` library so those macros
+still compile, but removes the perf CLI and the `cargo perf-test` /
+`perf-compare` aliases. See the rustdoc on `crates/util_macros` and
+`tooling/perf` for attribute details.
 
 ## ETW Profiling on Windows
 

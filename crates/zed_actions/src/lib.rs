@@ -660,6 +660,8 @@ pub mod assistant {
             #[action(deprecated_aliases = ["assistant::ToggleFocus"])]
             ToggleFocus,
             FocusAgent,
+            /// Opens the agent page as a center tab (history + conversation).
+            OpenAgentPage,
             /// Opens the skill creator window for creating a new skill.
             OpenSkillCreator,
             /// Opens the skill creator window to import a skill from a GitHub URL.

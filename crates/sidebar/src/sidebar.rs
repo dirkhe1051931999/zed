@@ -16,7 +16,7 @@ use agent_ui::threads_archive_view::{
     fuzzy_match_positions,
 };
 use agent_ui::{
-    AcpThreadImportOnboarding, Agent, AgentPanel, AgentPanelEvent, AgentThreadSource,
+    AcpThreadImportOnboarding, Agent, AgentPage, AgentPanel, AgentPanelEvent, AgentThreadSource,
     ArchiveSelectedThread, CrossChannelImportOnboarding, DEFAULT_THREAD_TITLE, NewTerminalThread,
     NewThread, RenameSelectedThread, TerminalId, ThreadId, ThreadImportModal,
     ThreadTitleRegenerationResult, channels_with_threads, import_threads_from_other_channels,
@@ -3628,11 +3628,7 @@ impl Sidebar {
         if let Some(agent_panel) = existing_panel {
             load_thread(agent_panel, metadata, focus, window, cx);
             workspace.update(cx, |workspace, cx| {
-                if focus {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
-                }
+                AgentPage::open(workspace, window, cx);
             });
             return;
         }
@@ -3649,11 +3645,7 @@ impl Sidebar {
                     panel.clone()
                 });
                 load_thread(panel, &metadata, focus, window, cx);
-                if focus {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
-                }
+                AgentPage::open(workspace, window, cx);
             })?;
 
             anyhow::Ok(())
@@ -3852,7 +3844,7 @@ impl Sidebar {
 
         if self.is_thread_active_in_workspace(&metadata.thread_id, workspace, cx) {
             workspace.update(cx, |workspace, cx| {
-                workspace.focus_panel::<AgentPanel>(window, cx);
+                AgentPage::open(workspace, window, cx);
             });
             return;
         }
@@ -4523,11 +4515,7 @@ impl Sidebar {
         if let Some(agent_panel) = existing_panel {
             restore_terminal(agent_panel, metadata, focus, None, window, cx);
             workspace.update(cx, |workspace, cx| {
-                if focus {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
-                }
+                AgentPage::open(workspace, window, cx);
             });
             return;
         }
@@ -4544,11 +4532,7 @@ impl Sidebar {
                     panel.clone()
                 });
                 restore_terminal(panel, &metadata, focus, Some(workspace), window, cx);
-                if focus {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
-                }
+                AgentPage::open(workspace, window, cx);
             })?;
 
             anyhow::Ok(())
@@ -6895,7 +6879,7 @@ impl Sidebar {
                 panel.activate_new_thread(true, AgentThreadSource::Sidebar, window, cx);
                 panel.active_thread_id(cx)
             });
-            workspace.focus_panel::<AgentPanel>(window, cx);
+            AgentPage::open(workspace, window, cx);
             draft_id
         });
 
@@ -6932,7 +6916,7 @@ impl Sidebar {
                     panel.new_terminal(Some(workspace), AgentThreadSource::Sidebar, window, cx);
                 });
             }
-            workspace.focus_panel::<AgentPanel>(window, cx);
+            AgentPage::open(workspace, window, cx);
         });
     }
 

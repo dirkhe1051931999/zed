@@ -90,7 +90,9 @@ impl SidebarStatus {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
+                    // Fork: AI entry is Agent page (status-bar Open Agent), not
+                    // the threads sidebar toggle.
+                    show_toggle: false,
                 }
             })
             .unwrap_or_default()
@@ -98,6 +100,8 @@ impl SidebarStatus {
 }
 
 pub struct StatusBar {
+    /// Rendered before every other left-side status bar control.
+    leading_items: Vec<Box<dyn StatusItemViewHandle>>,
     left_items: Vec<Box<dyn StatusItemViewHandle>>,
     right_items: Vec<Box<dyn StatusItemViewHandle>>,
     active_pane: Entity<Pane>,
@@ -196,6 +200,14 @@ impl StatusBar {
             .gap_1()
             .min_w_0()
             .overflow_x_hidden()
+            .children(
+                self.leading_items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        render_hideable_item("status-bar-leading", index, item.as_ref(), cx)
+                    }),
+            )
             .when(
                 sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Left,
                 |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
@@ -331,6 +343,7 @@ impl StatusBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
+            leading_items: Default::default(),
             left_items: Default::default(),
             right_items: Default::default(),
             active_pane: active_pane.clone(),
@@ -353,6 +366,22 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// Adds a status-bar item that renders to the left of every other left-side control.
+    pub fn add_leading_item<T>(
+        &mut self,
+        item: Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        T: 'static + StatusItemView,
+    {
+        let active_pane_item = self.active_pane.read(cx).active_item();
+        item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
+
+        self.leading_items.push(Box::new(item));
+        cx.notify();
+    }
+
     pub fn add_left_item<T>(&mut self, item: Entity<T>, window: &mut Window, cx: &mut Context<Self>)
     where
         T: 'static + StatusItemView,
@@ -365,8 +394,9 @@ impl StatusBar {
     }
 
     pub fn item_of_type<T: StatusItemView>(&self) -> Option<Entity<T>> {
-        self.left_items
+        self.leading_items
             .iter()
+            .chain(self.left_items.iter())
             .chain(self.right_items.iter())
             .find_map(|item| item.to_any().downcast().ok())
     }
@@ -448,7 +478,12 @@ impl StatusBar {
 
     fn update_active_pane_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane_item = self.active_pane.read(cx).active_item();
-        for item in self.left_items.iter().chain(&self.right_items) {
+        for item in self
+            .leading_items
+            .iter()
+            .chain(&self.left_items)
+            .chain(&self.right_items)
+        {
             item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
         }
     }

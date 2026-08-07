@@ -29,8 +29,8 @@ use zed_actions::{
         ResolveConflictsWithAgent, ReviewBranchDiff, SelectAgent,
     },
     assistant::{
-        FocusAgent, ManageSkills, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules, Toggle,
-        ToggleFocus,
+        FocusAgent, ManageSkills, OpenAgentPage, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules,
+        Toggle, ToggleFocus,
     },
 };
 
@@ -97,7 +97,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
+    ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
     item::{ItemEvent, ItemHandle},
 };
@@ -377,7 +377,7 @@ pub fn init(cx: &mut App) {
                         panel.update(cx, |panel, cx| {
                             panel.new_thread_with_workspace(Some(workspace), window, cx)
                         });
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                     }
                 })
                 .register_action(|workspace, _: &NewTerminalThread, window, cx| {
@@ -390,7 +390,7 @@ pub fn init(cx: &mut App) {
                                 cx,
                             )
                         });
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                     }
                 })
                 .register_action(
@@ -399,25 +399,25 @@ pub fn init(cx: &mut App) {
                             panel.update(cx, |panel, cx| {
                                 panel.new_native_agent_thread_from_summary(action, window, cx)
                             });
-                            workspace.focus_panel::<AgentPanel>(window, cx);
+                            crate::AgentPage::open(workspace, window, cx);
                         }
                     },
                 )
                 .register_action(|workspace, _: &ExpandMessageEditor, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| panel.expand_message_editor(window, cx));
                     }
                 })
                 .register_action(|workspace, _: &OpenSettings, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| panel.open_configuration(window, cx));
                     }
                 })
                 .register_action(|workspace, action: &NewExternalAgentThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.new_external_agent_thread(action, window, cx);
                         });
@@ -433,7 +433,7 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|workspace, action: &ManageSkills, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| panel.manage_skills(action, window, cx));
                     }
                 })
@@ -463,7 +463,7 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|workspace, _: &ToggleOptionsMenu, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.toggle_options_menu(&ToggleOptionsMenu, window, cx);
                         });
@@ -471,7 +471,7 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|workspace, _: &ToggleNewThreadMenu, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.toggle_new_thread_menu(&ToggleNewThreadMenu, window, cx);
                         });
@@ -513,7 +513,7 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|workspace, _: &LoadThreadFromClipboard, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.load_thread_from_clipboard(window, cx);
                         });
@@ -563,7 +563,7 @@ pub fn init(cx: &mut App) {
                         )),
                     ];
 
-                    workspace.focus_panel::<AgentPanel>(window, cx);
+                    crate::AgentPage::open(workspace, window, cx);
 
                     panel.update(cx, |panel, cx| {
                         panel.external_thread(
@@ -590,7 +590,7 @@ pub fn init(cx: &mut App) {
 
                         let content_blocks = build_conflict_resolution_prompt(&action.conflicts);
 
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
 
                         panel.update(cx, |panel, cx| {
                             panel.external_thread(
@@ -619,7 +619,7 @@ pub fn init(cx: &mut App) {
                         let content_blocks =
                             build_conflicted_files_resolution_prompt(&action.conflicted_file_paths);
 
-                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        crate::AgentPage::open(workspace, window, cx);
 
                         panel.update(cx, |panel, cx| {
                             panel.external_thread(
@@ -704,7 +704,7 @@ pub fn init(cx: &mut App) {
                         };
 
                         if !agent_panel.focus_handle(cx).contains_focused(window, cx) {
-                            workspace.toggle_panel_focus::<AgentPanel>(window, cx);
+                            crate::AgentPage::open(workspace, window, cx);
                         }
 
                         agent_panel.update(cx, |panel, cx| {
@@ -1601,12 +1601,8 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        if workspace
-            .panel::<Self>(cx)
-            .is_some_and(|panel| panel.read(cx).enabled(cx))
-        {
-            workspace.toggle_panel_focus::<Self>(window, cx);
-        }
+        // Fork: default AI entry is the Agent page, not the docked Agent panel.
+        crate::AgentPage::open_or_toggle(workspace, window, cx);
     }
 
     pub fn focus(
@@ -1615,12 +1611,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        if workspace
-            .panel::<Self>(cx)
-            .is_some_and(|panel| panel.read(cx).enabled(cx))
-        {
-            workspace.focus_panel::<Self>(window, cx);
-        }
+        crate::AgentPage::open(workspace, window, cx);
     }
 
     pub fn toggle(
@@ -1629,14 +1620,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        if workspace
-            .panel::<Self>(cx)
-            .is_some_and(|panel| panel.read(cx).enabled(cx))
-        {
-            if !workspace.toggle_panel_focus::<Self>(window, cx) {
-                workspace.close_panel::<Self>(window, cx);
-            }
-        }
+        crate::AgentPage::open_or_toggle(workspace, window, cx);
     }
 
     pub fn thread_store(&self) -> &Entity<ThreadStore> {
@@ -2719,13 +2703,12 @@ impl AgentPanel {
                                 multi_workspace.activate(workspace.clone(), None, window, cx);
 
                                 workspace.update(cx, |workspace, cx| {
-                                    workspace.reveal_panel::<AgentPanel>(window, cx);
+                                    crate::AgentPage::open(workspace, window, cx);
                                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                                         panel.update(cx, |panel, cx| {
                                             panel.activate_terminal(terminal_id, true, window, cx);
                                         });
                                     }
-                                    workspace.focus_panel::<AgentPanel>(window, cx);
                                 });
                             })
                             .log_err();
@@ -5027,8 +5010,10 @@ impl Panel for AgentPanel {
         Some(proto::PanelId::AssistantPanel)
     }
 
-    fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
-        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::ZedAssistant)
+    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
+        // Fork: hide the docked Agent panel button; Open Agent status-bar entry
+        // is the default AI surface.
+        None
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -5036,7 +5021,7 @@ impl Panel for AgentPanel {
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFocus)
+        Box::new(OpenAgentPage)
     }
 
     fn activation_priority(&self) -> u32 {
@@ -5739,7 +5724,7 @@ impl AgentPanel {
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                            .action("Open Agent", Box::new(OpenAgentPage));
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()

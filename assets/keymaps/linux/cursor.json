@@ -4,10 +4,10 @@
     "context": "Workspace",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-i": "agent::ToggleFocus",
-      "ctrl-shift-i": "agent::ToggleFocus",
-      "ctrl-l": "agent::ToggleFocus",
-      "ctrl-shift-l": "agent::ToggleFocus",
+      "ctrl-i": "agent::OpenAgentPage",
+      "ctrl-shift-i": "agent::OpenAgentPage",
+      "ctrl-l": "agent::OpenAgentPage",
+      "ctrl-shift-l": "agent::OpenAgentPage",
       "ctrl-shift-j": "agent::OpenSettings",
     },
   },
@@ -15,8 +15,8 @@
     "context": "Editor && mode == full",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-i": "agent::ToggleFocus",
-      "ctrl-shift-i": "agent::ToggleFocus",
+      "ctrl-i": "agent::OpenAgentPage",
+      "ctrl-shift-i": "agent::OpenAgentPage",
       "ctrl-shift-l": "agent::AddSelectionToThread", // In cursor uses "Ask" mode
       "ctrl-l": "agent::AddSelectionToThread", // In cursor uses "Agent" mode
       "ctrl-k": "assistant::InlineAssist",
@@ -46,7 +46,7 @@
       "ctrl-shift-backspace": "editor::Cancel",
       "ctrl-r": "agent::NewThread",
       "ctrl-shift-v": "editor::Paste",
-      // "escape": "agent::ToggleFocus"
+      // "escape": "agent::OpenAgentPage"
       ///// Enable when Zed supports multiple thread tabs
       // "ctrl-t": // new thread tab
       // "ctrl-[": // next thread tab

@@ -40,8 +40,17 @@ function Get-VSArch {
     }
 }
 
+$vsDevShellCandidates = @(
+    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1",
+    "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Launch-VsDevShell.ps1",
+    "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1"
+)
+$vsDevShell = $vsDevShellCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $vsDevShell) {
+    throw "Could not find Visual Studio 2022 Launch-VsDevShell.ps1"
+}
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
@@ -113,13 +122,27 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
+function Test-AutoUpdateHelperAvailable {
+    $members = (cargo metadata --no-deps --format-version=1 | ConvertFrom-Json).packages |
+        Select-Object -ExpandProperty name
+    return $members -contains "auto_update_helper"
+}
+
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
-    # Build zed.exe, cli.exe and auto_update_helper.exe
-    cargo build --release --package zed --package cli --package auto_update_helper --target $target
+    $script:hasAutoUpdateHelper = Test-AutoUpdateHelperAvailable
+    $packages = @("--package", "zed", "--package", "cli")
+    if ($script:hasAutoUpdateHelper) {
+        $packages += @("--package", "auto_update_helper")
+    } else {
+        Write-Host "auto_update_helper package not present; skipping"
+    }
+    cargo build --release @packages --target $target
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    if ($script:hasAutoUpdateHelper) {
+        Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    }
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -158,10 +181,12 @@ function ZipZedAndItsFriendsDebug {
     $items = @(
         ".\$CargoOutDir\zed.pdb",
         ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\auto_update_helper.pdb",
         ".\$CargoOutDir\explorer_command_injector.pdb",
         ".\$CargoOutDir\remote_server.pdb"
     )
+    if ($script:hasAutoUpdateHelper -and (Test-Path ".\$CargoOutDir\auto_update_helper.pdb")) {
+        $items += ".\$CargoOutDir\auto_update_helper.pdb"
+    }
 
     Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
 }
@@ -218,8 +243,16 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
-    & "$innoDir\sign.ps1" $files
+    $files = @(
+        "$innoDir\Zed.exe",
+        "$innoDir\cli.exe",
+        "$innoDir\zed_explorer_command_injector.dll",
+        "$innoDir\zed_explorer_command_injector.appx"
+    )
+    if ($script:hasAutoUpdateHelper -and (Test-Path "$innoDir\auto_update_helper.exe")) {
+        $files += "$innoDir\auto_update_helper.exe"
+    }
+    & "$innoDir\sign.ps1" ($files -join ",")
 }
 
 function DownloadAMDGpuServices {
@@ -244,7 +277,9 @@ function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
     Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
     Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
-    Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
+    if ($script:hasAutoUpdateHelper -and (Test-Path "$innoDir\auto_update_helper.exe")) {
+        Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
+    }
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
         Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force

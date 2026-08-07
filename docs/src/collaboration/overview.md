@@ -5,6 +5,10 @@ description: "Real-time collaboration in Zed: share projects, edit code together
 
 # Collaboration {#collaboration}
 
+> **本仓库说明：** 个人 Fork 已移除 Collab Panel、频道、语音通话与 LiveKit
+> 等相关实现。以下内容描述上游官方行为，在本仓库中不可用。详见
+> [本仓库精简说明](../development/fork-strip.zh.md)。
+
 Zed supports real-time multiplayer editing. Multiple people can work in the same project simultaneously, seeing each other's cursors and edits as they happen.
 
 Open the Collaboration Panel with {#kb collab_panel::ToggleFocus}. You'll need to [sign in](../authentication.md#signing-in) to access collaboration features.

@@ -1,49 +1,66 @@
-# Zed
+# Zed（个人 Fork）
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+基于 [Zed](https://github.com/zed-industries/zed) 的本地二次开发仓库。上游是高性能多人协作编辑器；**本仓库已做第一刀低耦合精简**，偏向个人本地开发，行为与官方发行版不完全一致。
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+详细说明见：[本仓库精简说明（中文）](./docs/src/development/fork-strip.zh.md)
 
 ---
 
-### Installation
+### 相对上游已剔除（摘要）
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+| 类别 | 已移除 |
+| --- | --- |
+| 协作 / 通话 | `collab` 服务端、`call` / `channel` / `collab_ui`、LiveKit |
+| 自动更新 / 反馈 | `auto_update*`、`feedback` |
+| 工具 / 实验 | benchmarks、`docs_preprocessor`、`eval_cli`、`xtask`、`gpui_web`、`nix/` 等 |
 
-Other platforms are not yet available:
+**仍保留：** 编辑器核心、LSP / Git / 终端 / 调试、AI Agent、SSH Remote、扩展宿主，以及 `client` / `rpc` 等账号与协议层。
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+---
 
-### Developing Zed
+### 本地构建（Windows）
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+依赖与步骤见 [Building Zed for Windows](./docs/src/development/windows.md)。常用命令：
 
-### Contributing
+```bat
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+set PATH=%USERPROFILE%\.cargo\bin;%VCToolsInstallDir%bin\Hostx64\x64;%PATH%
+cd /d D:\code\zed
+set ZED_STATELESS=1
+```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+若本机已安装官方 Zed，开发版可能被单实例接管，请先：
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+```bat
+set ZED_STATELESS=1
+```
+
+Rust 版本以仓库根目录 [`rust-toolchain.toml`](./rust-toolchain.toml) 为准。
+
+其他平台：
+
+- [macOS](./docs/src/development/macos.md)
+- [Linux](./docs/src/development/linux.md)
+
+---
+
+### 官方安装包（上游）
+
+需要官方完整功能（协作、自动更新等）时，请使用上游发行版：
+
+- [下载](https://zed.dev/download)
+- 上游仓库：https://github.com/zed-industries/zed
+
+---
 
 ### Licensing
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+源码许可与上游一致：主体为 GPL-3.0-or-later，部分组件为 Apache-2.0（以文件内标注为准）。
 
-License information for third party dependencies must be correctly provided for CI to pass.
+第三方依赖许可信息需满足 `cargo-about` / CI 要求；配置见 `script/licenses/zed-licenses.toml`。
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+---
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+### 说明
 
-## Sponsorship
-
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
-
+本 Fork 不代表 Zed Industries 官方立场。招聘、赞助等请参阅上游 [zed.dev](https://zed.dev) 与 [zed-industries/zed](https://github.com/zed-industries/zed)。

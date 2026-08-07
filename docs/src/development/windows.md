@@ -97,6 +97,10 @@ After this, restart the `postgresql` service. Press `Win`+`R` to open the Run di
 
 Once you have the dependencies installed, you can build Zed using [Cargo](https://doc.rust-lang.org/cargo/).
 
+> **本仓库说明：** 精简内容、MSVC `link.exe` 与 `coreutils` 冲突、以及
+> `ZED_STATELESS` 单实例说明，见
+> [本仓库精简说明](./fork-strip.zh.md#windows-build)。
+
 For a debug build:
 
 ```sh
@@ -116,6 +120,14 @@ cargo test --workspace
 ```
 
 > **Note:** Visual regression tests are currently macOS-only and require Screen Recording permission. See [Building Zed for macOS](./macos.md#visual-regression-tests) for details.
+
+If an installed Zed is already running, a development build may hand off to that
+instance and exit. Start a separate process with:
+
+```bat
+set ZED_STATELESS=1
+cargo run
+```
 
 ## Installing from msys2
 

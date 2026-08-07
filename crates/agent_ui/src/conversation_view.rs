@@ -3019,24 +3019,15 @@ impl ConversationView {
                                                 cx,
                                             );
                                             workspace.update(cx, |workspace, cx| {
-                                                workspace.reveal_panel::<AgentPanel>(window, cx);
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.load_agent_thread(
-                                                            agent.clone(),
-                                                            root_thread_id,
-                                                            root_work_dirs.clone(),
-                                                            root_title.clone(),
-                                                            true,
-                                                            AgentThreadSource::AgentPanel,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                                workspace.focus_panel::<AgentPanel>(window, cx);
+                                                crate::AgentPage::open_and_load_thread(
+                                                    workspace,
+                                                    agent.clone(),
+                                                    root_thread_id,
+                                                    root_work_dirs.clone(),
+                                                    root_title.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                             });
                                         }
                                     })

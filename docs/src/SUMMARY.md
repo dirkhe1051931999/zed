@@ -224,5 +224,6 @@
   - [Using Debuggers](./development/debuggers.md)
   - [Performance](./performance.md)
   - [Glossary](./development/glossary.md)
+  - [本仓库精简说明（个人 Fork）](./development/fork-strip.zh.md)
 - [Release Notes](./development/release-notes.md)
 - [Debugging Crashes](./development/debugging-crashes.md)

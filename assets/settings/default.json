@@ -1067,7 +1067,8 @@
     // Whether the agent is enabled.
     "enabled": true,
     // Whether to show the agent panel button in the status bar.
-    "button": true,
+    // Fork: docked Agent panel button is hidden; use status-bar Open Agent.
+    "button": false,
     // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
     "dock": "left",
     // Whether the agent panel should use flexible (proportional) sizing.

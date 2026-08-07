@@ -36,7 +36,7 @@ use workspace::{
     item::{ItemEvent, SaveOptions, TabContentParams, TabTooltipContent},
     searchable::SearchableItemHandle,
 };
-use zed_actions::assistant::ToggleFocus;
+use zed_actions::assistant::OpenAgentPage;
 
 pub struct AgentDiffPane {
     multibuffer: Entity<MultiBuffer>,
@@ -720,12 +720,12 @@ impl Render for AgentDiffPane {
                                 )
                                 .full_width()
                                 .key_binding(KeyBinding::for_action_in(
-                                    &ToggleFocus,
+                                    &OpenAgentPage,
                                     &focus_handle.clone(),
                                     cx,
                                 ))
                                 .on_click(|_event, window, cx| {
-                                    window.dispatch_action(ToggleFocus.boxed_clone(), cx)
+                                    window.dispatch_action(OpenAgentPage.boxed_clone(), cx)
                                 }),
                         ),
                 )

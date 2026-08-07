@@ -2,6 +2,7 @@ mod agent_configuration;
 pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
+mod agent_page;
 mod agent_panel;
 mod agent_registry_ui;
 mod buffer_codegen;
@@ -70,6 +71,7 @@ use workspace::{OpenOptions, Workspace};
 
 use crate::agent_configuration::ManageProfilesModal;
 pub use crate::agent_connection_store::{ActiveAcpConnection, AgentConnectionStore};
+pub use crate::agent_page::{AgentPage, AgentPageButton};
 pub use crate::agent_panel::{
     AgentPanel, AgentPanelEvent, AgentPanelTerminalInfo, MaxIdleRetainedThreads, TerminalId,
     ThreadTitleRegenerationResult,
@@ -648,6 +650,17 @@ pub fn init(
                         cx,
                     );
                 }
+            },
+        );
+    })
+    .detach();
+    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &zed_actions::assistant::OpenAgentPage,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                AgentPage::open_or_toggle(workspace, window, cx);
             },
         );
     })

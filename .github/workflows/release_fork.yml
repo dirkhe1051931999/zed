@@ -25,6 +25,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   CARGO_INCREMENTAL: "0"
+  # Avoid Node 20 deprecation noise from older JS actions on newer runners.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   prepare:
@@ -35,6 +37,9 @@ jobs:
       channel: ${{ steps.meta.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Regular files only for agent docs; do not restore a long-target symlink.
+          persist-credentials: false
 
       - name: Resolve build metadata
         id: meta

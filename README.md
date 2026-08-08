@@ -22,6 +22,8 @@
 
 依赖与步骤见 [Building Zed for Windows](./docs/src/development/windows.md)。
 
+CI（GitHub Actions）只打 Windows 安装包；本地开发用下面一键脚本。
+
 一键启动（MSVC 环境 + rustup PATH + `ZED_STATELESS` + 运行）：
 
 ```powershell

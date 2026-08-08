@@ -32,7 +32,7 @@ Rust / GPUI 编码规范继续遵循仓库根目录 [`.rules`](./.rules)。
 
 ## GitHub Actions（本 Fork）
 
-- 本仓库只需个人打包：只保留 [`.github/workflows/release_fork.yml`](./.github/workflows/release_fork.yml)（push `main` → 只打 Windows 包）。
+- 本仓库只需个人打包：只保留 [`.github/workflows/release_fork.yml`](./.github/workflows/release_fork.yml)（push `main` → 只打 Windows x86_64 包）。
 - **不要**从上游恢复定时任务、Issue triage、nightly、官方 release/test 等 workflow。
 - 官方 workflow 在 fork 上被 skip/取消是预期（`repository_owner == zed-industries`），不是要修的 CI bug。
 

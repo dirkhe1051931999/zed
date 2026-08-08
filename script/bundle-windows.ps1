@@ -37,20 +37,37 @@ function Get-VSArch {
     switch ($Arch) {
         "x86_64" { "amd64" }
         "aarch64" { "arm64" }
+        default { throw "Unsupported architecture: $Arch" }
+    }
+}
+
+function Get-VSHostArch {
+    param(
+        [string]$Arch
+    )
+
+    # Launch-VsDevShell.ps1 only accepts HostArch in {x86, amd64} on current VS
+    # installs (including windows-11-arm runners). Use amd64-hosted tools when
+    # the machine is ARM64; -Arch still selects the target (e.g. arm64).
+    switch ($Arch) {
+        "x86_64" { "amd64" }
+        "aarch64" { "amd64" }
+        default { throw "Unsupported architecture: $Arch" }
     }
 }
 
 $vsDevShellCandidates = @(
     "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1",
     "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Launch-VsDevShell.ps1",
-    "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1"
+    "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1",
+    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Launch-VsDevShell.ps1"
 )
 $vsDevShell = $vsDevShellCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $vsDevShell) {
     throw "Could not find Visual Studio 2022 Launch-VsDevShell.ps1"
 }
 Push-Location
-& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSHostArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"

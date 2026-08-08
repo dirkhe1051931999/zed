@@ -1,35 +1,21 @@
-# Simplified release pipeline for personal forks.
-# Builds Windows + macOS installers on GitHub-hosted runners and uploads
-# them to a GitHub Release on *this* repository (not zed-industries/zed).
+# Personal fork packaging: build Windows + macOS installers on push.
+# Official Zed workflows were removed from this fork; only this file remains.
 #
-# Usage:
-#   1. Ensure crates/zed/Cargo.toml version matches the tag you will push
-#      (e.g. version = "1.16.0" for tag v1.16.0 or v1.16.0-pre).
-#   2. git tag v1.16.0 && git push origin v1.16.0
-#      (use vX.Y.Z-pre for a preview channel build).
-#   3. Optional secrets for signed builds (unsigned if omitted):
-#        macOS: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD,
-#               APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID,
-#               APPLE_NOTARIZATION_ISSUER_ID
-#        Windows: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
-#                 plus vars AZURE_SIGNING_ACCOUNT_NAME / CERT_PROFILE_NAME / ENDPOINT
+# Triggers:
+#   - push to main
+#   - workflow_dispatch (Actions → Run workflow)
 #
-# Official Zed workflows remain gated on zed-industries and are left alone.
+# Outputs: Actions artifacts (DMG / EXE). Unsigned unless signing secrets are set.
 name: release_fork
 
 on:
   push:
-    tags:
-      - v*
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to build (e.g. v1.16.0). Leave empty to use the triggering ref.
-        required: false
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-fork-${{ github.ref }}
@@ -45,83 +31,21 @@ jobs:
     if: github.repository_owner != 'zed-industries'
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       channel: ${{ steps.meta.outputs.channel }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Resolve release metadata
+      - name: Resolve build metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
-          TAG="${TAG#refs/tags/}"
-
-          if [[ "$TAG" == *-pre ]]; then
-            CHANNEL=preview
-            VERSION="${TAG#v}"
-            VERSION="${VERSION%-pre}"
-          else
-            CHANNEL=stable
-            VERSION="${TAG#v}"
-          fi
-
-          CRATE_VERSION="$(script/get-crate-version zed)"
-          if [[ "$CRATE_VERSION" != "$VERSION" ]]; then
-            echo "Tag version ($VERSION) does not match crates/zed version ($CRATE_VERSION)"
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          VERSION="$(script/get-crate-version zed)"
+          CHANNEL="$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-          echo "Building $TAG (version=$VERSION, channel=$CHANNEL) for ${{ github.repository }}"
-
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          CHANNEL: ${{ steps.meta.outputs.channel }}
-          REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          NOTES_FILE="$(mktemp)"
-          {
-            echo "## ${TAG}"
-            echo
-            echo "Fork release of Zed \`${VERSION}\` (\`${CHANNEL}\`) for \`${REPO}\`."
-            echo
-            echo "### Downloads"
-            echo "- macOS Apple Silicon: \`Zed-aarch64.dmg\`"
-            echo "- macOS Intel: \`Zed-x86_64.dmg\`"
-            echo "- Windows x64: \`Zed-x86_64.exe\`"
-            echo "- Windows ARM64: \`Zed-aarch64.exe\`"
-            echo
-            echo "Builds are unsigned unless signing secrets are configured on this repository."
-          } > "$NOTES_FILE"
-
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "Release $TAG already exists"
-          else
-            PREVIEW_FLAG=()
-            if [[ "$CHANNEL" == "preview" ]]; then
-              PREVIEW_FLAG=(-p)
-            fi
-            gh release create "$TAG" \
-              --repo "$REPO" \
-              --title "$TAG" \
-              --notes-file "$NOTES_FILE" \
-              --draft \
-              "${PREVIEW_FLAG[@]}"
-          fi
+          echo "Building version=$VERSION channel=$CHANNEL for ${{ github.repository }} @ ${{ github.sha }}"
 
   bundle_mac_aarch64:
     needs: prepare
@@ -139,8 +63,6 @@ jobs:
       ZED_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set release channel file
         run: echo "${{ needs.prepare.outputs.channel }}" > crates/zed/RELEASE_CHANNEL
@@ -163,12 +85,6 @@ jobs:
           path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-macos-aarch64.gz
-          path: target/zed-remote-server-macos-aarch64.gz
-          if-no-files-found: error
-
   bundle_mac_x86_64:
     needs: prepare
     runs-on: macos-14
@@ -185,8 +101,6 @@ jobs:
       ZED_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set release channel file
         run: echo "${{ needs.prepare.outputs.channel }}" > crates/zed/RELEASE_CHANNEL
@@ -209,12 +123,6 @@ jobs:
           path: target/x86_64-apple-darwin/release/Zed-x86_64.dmg
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-macos-x86_64.gz
-          path: target/zed-remote-server-macos-x86_64.gz
-          if-no-files-found: error
-
   bundle_windows_x86_64:
     needs: prepare
     runs-on: windows-2022
@@ -235,8 +143,6 @@ jobs:
       ZED_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set release channel file
         shell: bash
@@ -266,12 +172,6 @@ jobs:
           path: target/Zed-x86_64.exe
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-windows-x86_64.zip
-          path: target/zed-remote-server-windows-x86_64.zip
-          if-no-files-found: error
-
   bundle_windows_aarch64:
     needs: prepare
     runs-on: windows-11-arm
@@ -292,8 +192,6 @@ jobs:
       ZED_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set release channel file
         shell: bash
@@ -333,50 +231,3 @@ jobs:
           name: Zed-aarch64.exe
           path: target/Zed-aarch64.exe
           if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-windows-aarch64.zip
-          path: target/zed-remote-server-windows-aarch64.zip
-          if-no-files-found: error
-
-  publish:
-    needs:
-      - prepare
-      - bundle_mac_aarch64
-      - bundle_mac_x86_64
-      - bundle_windows_x86_64
-      - bundle_windows_aarch64
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Stage release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-artifacts
-          find artifacts -type f -print
-          mv artifacts/Zed-aarch64.dmg/Zed-aarch64.dmg release-artifacts/
-          mv artifacts/Zed-x86_64.dmg/Zed-x86_64.dmg release-artifacts/
-          mv artifacts/Zed-x86_64.exe/Zed-x86_64.exe release-artifacts/
-          mv artifacts/Zed-aarch64.exe/Zed-aarch64.exe release-artifacts/
-          mv artifacts/zed-remote-server-macos-aarch64.gz/zed-remote-server-macos-aarch64.gz release-artifacts/
-          mv artifacts/zed-remote-server-macos-x86_64.gz/zed-remote-server-macos-x86_64.gz release-artifacts/
-          mv artifacts/zed-remote-server-windows-x86_64.zip/zed-remote-server-windows-x86_64.zip release-artifacts/
-          mv artifacts/zed-remote-server-windows-aarch64.zip/zed-remote-server-windows-aarch64.zip release-artifacts/
-          ls -la release-artifacts
-
-      - name: Upload assets and publish release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber release-artifacts/*
-          gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
-          echo "Published https://github.com/${{ github.repository }}/releases/tag/$TAG"

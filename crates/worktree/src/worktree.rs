@@ -155,6 +155,9 @@ pub struct PathPrefixScanRequest {
 struct ScanRequest {
     relative_paths: Vec<Arc<RelPath>>,
     done: SmallVec<[barrier::Sender; 1]>,
+    /// When true, perform a root `PathEventKind::Rescan` (recursive reconcile +
+    /// git reload) instead of a non-recursive path refresh.
+    full_rescan: bool,
 }
 
 pub struct RemoteWorktree {
@@ -2116,6 +2119,24 @@ impl LocalWorktree {
             .try_send(ScanRequest {
                 relative_paths: paths,
                 done: smallvec![tx],
+                full_rescan: false,
+            })
+            .ok();
+        rx
+    }
+
+    /// Force a root-level filesystem rescan, matching watcher-overflow recovery.
+    ///
+    /// Use this when external tools may have changed the tree without the
+    /// watcher delivering events. Completes the returned barrier after the
+    /// recursive reconcile (and git repository reload) finishes.
+    pub fn force_rescan(&self) -> barrier::Receiver {
+        let (tx, rx) = barrier::channel();
+        self.scan_requests_tx
+            .try_send(ScanRequest {
+                relative_paths: Vec::new(),
+                done: smallvec![tx],
+                full_rescan: true,
             })
             .ok();
         rx
@@ -4521,7 +4542,11 @@ impl BackgroundScanner {
                 // these before handling changes reported by the filesystem.
                 request = self.next_scan_request().fuse() => {
                     let Ok(request) = request else { break };
-                    if !self.process_scan_request(request, false).await {
+                    if request.full_rescan {
+                        if !self.process_full_rescan_request(request).await {
+                            return;
+                        }
+                    } else if !self.process_scan_request(request, false).await {
                         return;
                     }
                 }
@@ -4571,6 +4596,24 @@ impl BackgroundScanner {
                 }
             }
         }
+    }
+
+    async fn process_full_rescan_request(&self, request: ScanRequest) -> bool {
+        let root_path = self.state.lock().await.snapshot.abs_path.clone();
+        let path = match self.fs.canonicalize(root_path.as_path()).await {
+            Ok(path) => path,
+            Err(err) => {
+                log::error!("failed to canonicalize root path {root_path:?}: {err:#}");
+                root_path.as_path().to_path_buf()
+            }
+        };
+        log::debug!("forcing full worktree rescan at {path:?}");
+        self.process_events(vec![PathEvent {
+            path,
+            kind: Some(fs::PathEventKind::Rescan),
+        }])
+        .await;
+        self.send_status_update(false, request.done, &[]).await
     }
 
     async fn process_scan_request(&self, mut request: ScanRequest, scanning: bool) -> bool {
@@ -6163,6 +6206,7 @@ impl BackgroundScanner {
         while let Ok(next_request) = self.scan_requests_rx.try_recv() {
             request.relative_paths.extend(next_request.relative_paths);
             request.done.extend(next_request.done);
+            request.full_rescan |= next_request.full_rescan;
         }
         Ok(request)
     }

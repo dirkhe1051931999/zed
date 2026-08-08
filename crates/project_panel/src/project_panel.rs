@@ -355,6 +355,8 @@ actions!(
         Duplicate,
         /// Reveals the selected item in the system file manager.
         RevealInFileManager,
+        /// Rescans the project from disk and refreshes git status.
+        RefreshProject,
         /// Removes the selected folder from the project.
         RemoveFromProject,
         /// Cuts the selected file or directory.
@@ -1133,6 +1135,9 @@ impl ProjectPanel {
                                 menu.action("Open in Default App", Box::new(OpenWithSystem))
                             })
                             .action("Open in Terminal", Box::new(OpenInTerminal))
+                            .when(is_local && is_root, |menu| {
+                                menu.action("Refresh Project", Box::new(RefreshProject))
+                            })
                             .when(is_markdown, |menu| {
                                 menu.action("Open Markdown Preview", Box::new(OpenMarkdownPreview))
                             })
@@ -3753,6 +3758,38 @@ impl ProjectPanel {
             self.project
                 .update(cx, |project, cx| project.reveal_path(&path, cx));
         }
+    }
+
+    fn refresh_project(
+        &mut self,
+        _: &RefreshProject,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self.project.read(cx);
+        if !(project.is_local() || project.is_via_wsl_with_host_interop(cx)) {
+            return;
+        }
+
+        let worktree_ids: Vec<_> = if let Some(selection) = self.selection {
+            vec![selection.worktree_id]
+        } else {
+            project
+                .visible_worktrees(cx)
+                .map(|worktree| worktree.read(cx).id())
+                .collect()
+        };
+
+        for worktree_id in worktree_ids {
+            if let Some(worktree) = self.project.read(cx).worktree_for_id(worktree_id, cx) {
+                worktree.update(cx, |worktree, _cx| {
+                    if let Some(local) = worktree.as_local() {
+                        local.force_rescan();
+                    }
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn remove_from_project(
@@ -7083,6 +7120,7 @@ impl Render for ProjectPanel {
                         el.on_action(cx.listener(Self::reveal_in_finder))
                             .on_action(cx.listener(Self::open_system))
                             .on_action(cx.listener(Self::open_in_terminal))
+                            .on_action(cx.listener(Self::refresh_project))
                     },
                 )
                 .when(project.is_via_remote_server(), |el| {

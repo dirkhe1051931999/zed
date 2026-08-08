@@ -20,20 +20,27 @@
 
 ### 本地构建（Windows）
 
-依赖与步骤见 [Building Zed for Windows](./docs/src/development/windows.md)。常用命令：
+依赖与步骤见 [Building Zed for Windows](./docs/src/development/windows.md)。
+
+一键启动（MSVC 环境 + rustup PATH + `ZED_STATELESS` + 运行）：
+
+```powershell
+.\script\run-windows.ps1
+```
+
+等价于下面 5 步：
 
 ```bat
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 set PATH=%USERPROFILE%\.cargo\bin;%VCToolsInstallDir%bin\Hostx64\x64;%PATH%
 cd /d D:\code\zed
 set ZED_STATELESS=1
+cargo run -p zed
 ```
 
-若本机已安装官方 Zed，开发版可能被单实例接管，请先：
+Release 构建：`.\script\run-windows.ps1 --release`
 
-```bat
-set ZED_STATELESS=1
-```
+若本机已安装官方 Zed，开发版可能被单实例接管；脚本已默认设置 `ZED_STATELESS=1`。
 
 Rust 版本以仓库根目录 [`rust-toolchain.toml`](./rust-toolchain.toml) 为准。
 

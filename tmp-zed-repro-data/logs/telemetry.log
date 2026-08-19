@@ -1,8 +1,0 @@
-{"signed_in":false,"milliseconds_since_first_event":0,"type":"Flexible","event_type":"App First Opened","event_properties":{"event_source":"zed"}}
-{"signed_in":false,"milliseconds_since_first_event":0,"type":"Flexible","event_type":"App First Opened For Release Channel","event_properties":{"event_source":"zed"}}
-{"signed_in":false,"milliseconds_since_first_event":270,"type":"Flexible","event_type":"Settings Changed","event_properties":{"setting":"theme","event_source":"zed","value":"One Light"}}
-{"signed_in":false,"milliseconds_since_first_event":270,"type":"Flexible","event_type":"Settings Changed","event_properties":{"value":"Zed","setting":"keymap","event_source":"zed"}}
-{"signed_in":false,"milliseconds_since_first_event":0,"type":"Flexible","event_type":"Project Opened","event_properties":{"event_source":"zed","project_type":"node"}}
-{"signed_in":false,"milliseconds_since_first_event":0,"type":"Flexible","event_type":"Project Opened","event_properties":{"project_type":"pnpm","event_source":"zed"}}
-{"signed_in":false,"milliseconds_since_first_event":0,"type":"Flexible","event_type":"Extensions Loaded","event_properties":{"event_source":"zed","id_and_versions":[["html","0.3.1"]]}}
-{"signed_in":false,"milliseconds_since_first_event":934,"type":"Flexible","event_type":"Trust and Continue","event_properties":{"event_source":"zed","source":"Worktree Trust Modal"}}

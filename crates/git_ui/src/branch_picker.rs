@@ -8,8 +8,9 @@ use git::{GitHostingProviderRegistry, parse_git_remote_url};
 use gpui::http_client::Url;
 use gpui::{
     Action, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, ParentElement, PromptLevel,
-    Render, SharedString, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, rems,
+    InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, MouseButton, ParentElement,
+    PromptLevel, Render, SharedString, Styled, Subscription, Task, TaskExt, WeakEntity, Window,
+    actions, rems,
 };
 use picker::{Picker, PickerDelegate, PickerEditorPosition};
 use project::git_store::{Repository, RepositoryEvent};
@@ -19,7 +20,7 @@ use settings::Settings;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use ui::{
-    Banner, ContextMenu, Divider, HighlightedLabel, Indicator, KeyBinding, ListItem,
+    Banner, ContextMenu, CopyButton, Divider, HighlightedLabel, Indicator, KeyBinding, ListItem,
     ListItemSpacing, ListSubHeader, PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
 };
 use ui_input::ErasedEditor;
@@ -1714,6 +1715,12 @@ impl PickerDelegate for BranchListDelegate {
             Entry::NewUrl { .. } | Entry::NewBranch { .. } | Entry::NewRemoteName { .. }
         );
 
+        let copy_branch_icon = |entry_ix: usize, branch_name: SharedString| {
+            CopyButton::new(("copy-branch", entry_ix), branch_name)
+                .icon_size(IconSize::Small)
+                .tooltip_label("Copy Branch Name")
+        };
+
         let deleted_branch_icon = |entry_ix: usize| {
             let picker = picker.clone();
             let focus_handle = focus_handle.clone();
@@ -1775,16 +1782,30 @@ impl PickerDelegate for BranchListDelegate {
                 .into_any_element()
         });
 
+        let show_branch_actions = !self.is_select_only() && !is_new_items;
+        let action_overlay_bg = cx
+            .theme()
+            .colors()
+            .elevated_surface_background
+            .blend(cx.theme().colors().ghost_element_hover);
+        let action_hover_padding = if is_head_branch {
+            rems_from_px(28.)
+        } else {
+            rems_from_px(52.)
+        };
+
         let list_item = ListItem::new(format!("vcs-menu-{ix}"))
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
             .toggle_state(selected)
             .child(
                 h_flex()
+                    .relative()
                     .w_full()
                     .min_w_0()
                     .gap_2p5()
                     .flex_grow_1()
+                    .overflow_hidden()
                     .child(
                         Icon::new(entry_icon)
                             .color(if is_checked_branch {
@@ -1797,8 +1818,14 @@ impl PickerDelegate for BranchListDelegate {
                     .child(
                         v_flex()
                             .id("info_container")
-                            .w_full()
+                            .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
+                            .when(show_branch_actions, |this| {
+                                this.group_hover("list_item", |style| {
+                                    style.pr(action_hover_padding)
+                                })
+                            })
                             .child(entry_title)
                             .child({
                                 let message = match entry {
@@ -1890,6 +1917,7 @@ impl PickerDelegate for BranchListDelegate {
                                         let is_select_only = self.is_select_only();
                                         Tooltip::element(move |_, _| {
                                             v_flex()
+                                                .max_w_64()
                                                 .child(Label::new(branch_name.clone()))
                                                 .when(is_select_only && is_checked, |this| {
                                                     this.child(
@@ -1917,14 +1945,29 @@ impl PickerDelegate for BranchListDelegate {
                                     })
                                 },
                             ),
-                    ),
-            )
-            .when(
-                !self.is_select_only() && !is_new_items && !is_head_branch,
-                |this| {
-                    this.end_slot(deleted_branch_icon(ix))
-                        .show_end_slot_on_hover()
-                },
+                    )
+                    .when(show_branch_actions, |this| {
+                        let branch_name: SharedString = entry.name().to_string().into();
+                        this.child(
+                            h_flex()
+                                .absolute()
+                                .inset_y_0()
+                                .right_0()
+                                .items_center()
+                                .gap_0p5()
+                                .pl_2()
+                                .bg(action_overlay_bg)
+                                .visible_on_hover("list_item")
+                                .occlude()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(copy_branch_icon(ix, branch_name))
+                                .when(!is_head_branch, |this| {
+                                    this.child(deleted_branch_icon(ix))
+                                }),
+                        )
+                    }),
             )
             .when_some(
                 if is_new_items {

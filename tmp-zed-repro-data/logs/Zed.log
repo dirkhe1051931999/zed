@@ -1,3 +1,0 @@
-2026-08-07T17:43:02+08:00 ERROR [crates/zed/src/main.rs:1876] canonicalizing "crates/grammars/src": 系统找不到指定的路径。 (os error 3)
-2026-08-07T17:43:03+08:00 ERROR [crates/gpui_windows/src/platform.rs:294] 拒绝访问。 (0x80070005)
-2026-08-07T17:43:03+08:00 ERROR [agent] Failed to authenticate provider: llama.cpp: Failed to connect to llama.cpp API: 502 Bad Gateway 

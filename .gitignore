@@ -60,3 +60,16 @@ crates/docs_preprocessor/actions.json
 .nixos-test-history
 
 .local*
+
+# Local Windows packaging / vendor dumps (do not commit binaries or SDKs)
+/AGS_SDK*/
+/AGS_SDK*.zip
+/Microsoft.Windows.Console.ConPTY*.nupkg
+/conpty/
+/inno/
+
+# Local repro / run logs (ZED_STATELESS or manual dumps)
+/tmp-zed-repro-data/
+/tmp-zed-repro-*.txt
+/zed-stderr.txt
+/zed-stdout.txt

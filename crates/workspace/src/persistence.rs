@@ -535,10 +535,14 @@ impl sqlez::bindable::Bind for SerializedPixels {
 
 pub struct WorkspaceDb(ThreadSafeConnection);
 
+const fn as_str_slice<const N: usize>(items: &'static [&'static str; N]) -> &'static [&'static str] {
+    items
+}
+
 impl Domain for WorkspaceDb {
     const NAME: &str = stringify!(WorkspaceDb);
 
-    const MIGRATIONS: &[&str] = &[
+    const MIGRATIONS: &[&str] = as_str_slice(&[
         sql!(
             CREATE TABLE workspaces(
                 workspace_id INTEGER PRIMARY KEY,
@@ -1051,7 +1055,24 @@ impl Domain for WorkspaceDb {
         sql!(
             ALTER TABLE bookmarks ADD COLUMN label TEXT NOT NULL DEFAULT "";
         ),
-    ];
+        sql!(
+            CREATE TABLE project_folders (
+                folder_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                position INTEGER NOT NULL
+            ) STRICT;
+
+            CREATE TABLE project_folder_assignments (
+                folder_id INTEGER NOT NULL REFERENCES project_folders(folder_id)
+                    ON DELETE CASCADE,
+                remote_identity TEXT NOT NULL DEFAULT "",
+                identity_paths TEXT NOT NULL,
+                identity_paths_order TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (remote_identity, identity_paths)
+            ) STRICT;
+        ),
+    ]);
 
     // Allow recovering from bad migration that was initially shipped to nightly
     // when introducing the ssh_connections table.
@@ -2110,6 +2131,13 @@ impl WorkspaceDb {
         )
         .await;
 
+        self.delete_project_folder_assignment(
+            &target.project_folder_identity(),
+            &target.identity_paths,
+        )
+        .await
+        .ok();
+
         Ok(workspace_ids)
     }
 
@@ -2655,6 +2683,237 @@ VALUES {placeholders};"#
             DELETE FROM trusted_worktrees
         }
     }
+
+    query! {
+        fn project_folder_rows() -> Result<Vec<(i64, String, i64)>> {
+            SELECT folder_id, name, position
+            FROM project_folders
+            ORDER BY position ASC, folder_id ASC
+        }
+    }
+
+    query! {
+        fn project_folder_assignment_rows() -> Result<Vec<(i64, String, String, String, i64)>> {
+            SELECT folder_id, remote_identity, identity_paths, identity_paths_order, position
+            FROM project_folder_assignments
+            ORDER BY folder_id ASC, position ASC, identity_paths ASC
+        }
+    }
+
+    pub fn project_folders(&self) -> Result<Vec<ProjectFolder>> {
+        Ok(self
+            .project_folder_rows()?
+            .into_iter()
+            .map(|(folder_id, name, position)| ProjectFolder {
+                folder_id: ProjectFolderId(folder_id),
+                name,
+                position,
+            })
+            .collect())
+    }
+
+    pub fn project_folder_assignments(&self) -> Result<Vec<ProjectFolderAssignment>> {
+        Ok(self
+            .project_folder_assignment_rows()?
+            .into_iter()
+            .map(
+                |(folder_id, remote_identity, identity_paths, identity_paths_order, position)| {
+                    ProjectFolderAssignment {
+                        folder_id: ProjectFolderId(folder_id),
+                        remote_identity,
+                        identity_paths: PathList::deserialize(&SerializedPathList {
+                            paths: identity_paths,
+                            order: identity_paths_order,
+                        }),
+                        position,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    pub async fn create_project_folder(&self, name: String) -> Result<ProjectFolder> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            bail!("Folder name cannot be empty");
+        }
+
+        let folders = self.project_folders()?;
+        if folders
+            .iter()
+            .any(|folder| folder.name.eq_ignore_ascii_case(&name))
+        {
+            bail!("A folder named \"{name}\" already exists");
+        }
+
+        let position = folders
+            .iter()
+            .map(|folder| folder.position)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        let folder_name = name.clone();
+        let folder_id = self
+            .write(move |connection| {
+                let mut insert = connection
+                    .select_row_bound::<(String, i64), i64>(sql!(
+                        INSERT INTO project_folders (name, position)
+                        VALUES (?1, ?2)
+                        RETURNING folder_id
+                    ))
+                    .context("insert project folder")?;
+                insert((folder_name, position))?.context("insert project folder returned no id")
+            })
+            .await?;
+
+        Ok(ProjectFolder {
+            folder_id: ProjectFolderId(folder_id),
+            name,
+            position,
+        })
+    }
+
+    pub async fn rename_project_folder(
+        &self,
+        folder_id: ProjectFolderId,
+        name: String,
+    ) -> Result<ProjectFolder> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            bail!("Folder name cannot be empty");
+        }
+
+        let folders = self.project_folders()?;
+        let Some(existing) = folders.iter().find(|folder| folder.folder_id == folder_id) else {
+            bail!("Folder not found");
+        };
+        if folders
+            .iter()
+            .any(|folder| folder.folder_id != folder_id && folder.name.eq_ignore_ascii_case(&name))
+        {
+            bail!("A folder named \"{name}\" already exists");
+        }
+        let position = existing.position;
+
+        let folder_id_value = folder_id.0;
+        let new_name = name.clone();
+        self.write(move |connection| {
+            connection.exec_bound::<(String, i64)>(sql!(
+                UPDATE project_folders
+                SET name = ?1
+                WHERE folder_id = ?2
+            ))?((new_name, folder_id_value))
+        })
+        .await?;
+
+        Ok(ProjectFolder {
+            folder_id,
+            name,
+            position,
+        })
+    }
+
+    pub async fn delete_project_folder(&self, folder_id: ProjectFolderId) -> Result<()> {
+        let folder_id = folder_id.0;
+        self.write(move |connection| {
+            connection.exec_bound::<i64>(sql!(
+                DELETE FROM project_folders WHERE folder_id = ?
+            ))?(folder_id)
+        })
+        .await
+    }
+
+    pub async fn assign_project_to_folder(
+        &self,
+        folder_id: ProjectFolderId,
+        remote_identity: String,
+        identity_paths: PathList,
+    ) -> Result<()> {
+        if !self
+            .project_folders()?
+            .iter()
+            .any(|folder| folder.folder_id == folder_id)
+        {
+            bail!("Folder not found");
+        }
+
+        self.delete_project_folder_assignment(&remote_identity, &identity_paths)
+            .await?;
+
+        let next_position = self
+            .project_folder_assignments()?
+            .into_iter()
+            .filter(|assignment| assignment.folder_id == folder_id)
+            .map(|assignment| assignment.position)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        let serialized = identity_paths.serialize();
+        let folder_id = folder_id.0;
+        self.write(move |connection| {
+            connection.exec_bound::<(i64, String, String, String, i64)>(sql!(
+                INSERT INTO project_folder_assignments
+                    (folder_id, remote_identity, identity_paths, identity_paths_order, position)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+            ))?((
+                folder_id,
+                remote_identity,
+                serialized.paths,
+                serialized.order,
+                next_position,
+            ))
+        })
+        .await
+    }
+
+    pub async fn unassign_project_from_folder(
+        &self,
+        remote_identity: String,
+        identity_paths: PathList,
+    ) -> Result<()> {
+        self.delete_project_folder_assignment(&remote_identity, &identity_paths)
+            .await
+    }
+
+    async fn delete_project_folder_assignment(
+        &self,
+        remote_identity: &str,
+        identity_paths: &PathList,
+    ) -> Result<()> {
+        let remote_identity = remote_identity.to_string();
+        let serialized = identity_paths.serialize();
+        self.write(move |connection| {
+            connection.exec_bound::<(String, String)>(sql!(
+                DELETE FROM project_folder_assignments
+                WHERE remote_identity = ?1 AND identity_paths = ?2
+            ))?((remote_identity, serialized.paths))
+        })
+        .await
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectFolderId(pub i64);
+
+impl ProjectFolderId {
+    pub fn from_i64(value: i64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectFolder {
+    pub folder_id: ProjectFolderId,
+    pub name: String,
+    pub position: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectFolderAssignment {
+    pub folder_id: ProjectFolderId,
+    pub remote_identity: String,
+    pub identity_paths: PathList,
+    pub position: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2673,6 +2932,20 @@ impl RecentWorkspace {
             SerializedWorkspaceLocation::Remote(options) => Some(options.clone()),
         };
         ProjectGroupKey::new(host, self.identity_paths.clone())
+    }
+
+    /// Stable identity used to assign this recent workspace to a user folder.
+    ///
+    /// Local workspaces use an empty string; remotes use
+    /// [`RemoteConnectionIdentity::persistence_key`]. This is intentionally not
+    /// `WorkspaceId`, which changes across save/reopen.
+    pub fn project_folder_identity(&self) -> String {
+        match &self.location {
+            SerializedWorkspaceLocation::Local => String::new(),
+            SerializedWorkspaceLocation::Remote(options) => {
+                remote_connection_identity(options).persistence_key()
+            }
+        }
     }
 }
 
@@ -5559,6 +5832,151 @@ mod tests {
         assert_eq!(recents.len(), 2);
         assert_eq!(recents[0].workspace_id, WorkspaceId(2));
         assert_eq!(recents[1].workspace_id, WorkspaceId(1));
+    }
+
+    #[gpui::test]
+    async fn test_project_folder_crud_and_assignments() {
+        let db = WorkspaceDb::open_test_db("test_project_folder_crud_and_assignments").await;
+
+        let work = db.create_project_folder("Work".into()).await.unwrap();
+        let side = db
+            .create_project_folder("Side projects".into())
+            .await
+            .unwrap();
+        assert!(
+            db.create_project_folder("work".into()).await.is_err(),
+            "duplicate folder names should be rejected"
+        );
+        assert!(
+            db.create_project_folder("   ".into()).await.is_err(),
+            "empty folder names should be rejected"
+        );
+
+        let folders = db.project_folders().unwrap();
+        assert_eq!(
+            folders
+                .iter()
+                .map(|folder| folder.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Work", "Side projects"]
+        );
+        assert!(work.position < side.position);
+
+        let zed = PathList::new(&[Path::new("/code/zed")]);
+        let wvp = PathList::new(&[Path::new("/code/wvp-web")]);
+        db.assign_project_to_folder(work.folder_id, String::new(), zed.clone())
+            .await
+            .unwrap();
+        db.assign_project_to_folder(work.folder_id, String::new(), wvp.clone())
+            .await
+            .unwrap();
+
+        let assignments = db.project_folder_assignments().unwrap();
+        let work_assignments: Vec<_> = assignments
+            .iter()
+            .filter(|assignment| assignment.folder_id == work.folder_id)
+            .collect();
+        assert_eq!(work_assignments.len(), 2);
+        assert_eq!(work_assignments[0].identity_paths, zed);
+        assert_eq!(work_assignments[1].identity_paths, wvp);
+        assert!(work_assignments[0].position < work_assignments[1].position);
+
+        db.assign_project_to_folder(side.folder_id, String::new(), zed.clone())
+            .await
+            .unwrap();
+        let assignments = db.project_folder_assignments().unwrap();
+        assert_eq!(
+            assignments
+                .iter()
+                .filter(|assignment| assignment.identity_paths == zed)
+                .count(),
+            1,
+            "a project can belong to only one folder"
+        );
+        assert_eq!(
+            assignments
+                .iter()
+                .find(|assignment| assignment.identity_paths == zed)
+                .map(|assignment| assignment.folder_id),
+            Some(side.folder_id)
+        );
+
+        db.rename_project_folder(work.folder_id, "Day job".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.project_folders()
+                .unwrap()
+                .iter()
+                .find(|folder| folder.folder_id == work.folder_id)
+                .map(|folder| folder.name.as_str()),
+            Some("Day job")
+        );
+
+        db.delete_project_folder(side.folder_id).await.unwrap();
+        let folders = db.project_folders().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "Day job");
+        assert!(
+            db.project_folder_assignments()
+                .unwrap()
+                .iter()
+                .all(|assignment| assignment.identity_paths != zed),
+            "deleting a folder should unassign its projects, not delete them"
+        );
+
+        db.assign_project_to_folder(work.folder_id, String::new(), zed.clone())
+            .await
+            .unwrap();
+        db.unassign_project_from_folder(String::new(), zed.clone())
+            .await
+            .unwrap();
+        assert!(
+            db.project_folder_assignments()
+                .unwrap()
+                .iter()
+                .all(|assignment| assignment.identity_paths != zed)
+        );
+    }
+
+    #[gpui::test]
+    async fn test_delete_recent_workspace_group_clears_folder_assignment(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        let db = WorkspaceDb::open_test_db(
+            "test_delete_recent_workspace_group_clears_folder_assignment",
+        )
+        .await;
+
+        fs.insert_tree("/folder-project", json!({ "src": { "main.rs": "" } }))
+            .await;
+
+        db.save_workspace(workspace_with(
+            1,
+            &[Path::new("/folder-project")],
+            empty_pane_group(),
+            None,
+        ))
+        .await;
+
+        let recents = db.recent_project_workspaces(fs.as_ref()).await.unwrap();
+        assert_eq!(recents.len(), 1);
+        let folder = db.create_project_folder("Work".into()).await.unwrap();
+        db.assign_project_to_folder(
+            folder.folder_id,
+            recents[0].project_folder_identity(),
+            recents[0].identity_paths.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.project_folder_assignments().unwrap().len(), 1);
+
+        db.delete_recent_workspace_group(&recents[0]).await.unwrap();
+        assert!(
+            db.project_folder_assignments().unwrap().is_empty(),
+            "removing a recent project should drop its folder assignment"
+        );
     }
 
     #[gpui::test]

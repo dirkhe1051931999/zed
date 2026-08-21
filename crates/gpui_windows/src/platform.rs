@@ -1239,12 +1239,16 @@ fn file_open_dialog(
     let folder_dialog: IFileOpenDialog =
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)? };
 
-    let mut dialog_options = FOS_FILEMUSTEXIST;
+    // FOS_FILEMUSTEXIST on a folder picker makes the Open button enter the
+    // highlighted folder instead of returning it.
+    let mut dialog_options = FOS_PATHMUSTEXIST;
     if options.multiple {
         dialog_options |= FOS_ALLOWMULTISELECT;
     }
     if options.directories {
         dialog_options |= FOS_PICKFOLDERS;
+    } else {
+        dialog_options |= FOS_FILEMUSTEXIST;
     }
 
     unsafe {

@@ -8,7 +8,7 @@ use git::{GitHostingProviderRegistry, parse_git_remote_url};
 use gpui::http_client::Url;
 use gpui::{
     Action, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, MouseButton, ParentElement,
+    InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, ParentElement,
     PromptLevel, Render, SharedString, Styled, Subscription, Task, TaskExt, WeakEntity, Window,
     actions, rems,
 };
@@ -1783,16 +1783,14 @@ impl PickerDelegate for BranchListDelegate {
         });
 
         let show_branch_actions = !self.is_select_only() && !is_new_items;
-        let action_overlay_bg = cx
-            .theme()
-            .colors()
-            .elevated_surface_background
-            .blend(cx.theme().colors().ghost_element_hover);
-        let action_hover_padding = if is_head_branch {
-            rems_from_px(28.)
-        } else {
-            rems_from_px(52.)
-        };
+        let branch_name: SharedString = entry.name().to_string().into();
+        let branch_actions = show_branch_actions.then(|| {
+            h_flex()
+                .items_center()
+                .gap_0p5()
+                .child(copy_branch_icon(ix, branch_name.clone()))
+                .when(!is_head_branch, |this| this.child(deleted_branch_icon(ix)))
+        });
 
         let list_item = ListItem::new(format!("vcs-menu-{ix}"))
             .inset(true)
@@ -1821,11 +1819,6 @@ impl PickerDelegate for BranchListDelegate {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .when(show_branch_actions, |this| {
-                                this.group_hover("list_item", |style| {
-                                    style.pr(action_hover_padding)
-                                })
-                            })
                             .child(entry_title)
                             .child({
                                 let message = match entry {
@@ -1945,39 +1938,23 @@ impl PickerDelegate for BranchListDelegate {
                                     })
                                 },
                             ),
-                    )
-                    .when(show_branch_actions, |this| {
-                        let branch_name: SharedString = entry.name().to_string().into();
-                        this.child(
-                            h_flex()
-                                .absolute()
-                                .inset_y_0()
-                                .right_0()
-                                .items_center()
-                                .gap_0p5()
-                                .pl_2()
-                                .bg(action_overlay_bg)
-                                .visible_on_hover("list_item")
-                                .occlude()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .child(copy_branch_icon(ix, branch_name))
-                                .when(!is_head_branch, |this| {
-                                    this.child(deleted_branch_icon(ix))
-                                }),
-                        )
-                    }),
+                    ),
             )
-            .when_some(
-                if is_new_items {
-                    create_from_default_button
-                } else {
-                    None
-                },
-                |this, create_from_default_button| {
-                    this.end_slot(create_from_default_button)
-                        .show_end_slot_on_hover()
+            .when(
+                show_branch_actions || create_from_default_button.is_some(),
+                |this| {
+                    this.end_slot(
+                        h_flex()
+                            .items_center()
+                            .gap_0p5()
+                            .children(branch_actions)
+                            .children(if is_new_items {
+                                create_from_default_button
+                            } else {
+                                None
+                            }),
+                    )
+                    .when(!selected, |this| this.show_end_slot_on_hover())
                 },
             );
 

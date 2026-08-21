@@ -6,6 +6,7 @@ pub mod sidebar_recent_projects;
 mod ssh_config;
 
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -17,11 +18,12 @@ use fs::Fs;
 #[cfg(target_os = "windows")]
 mod wsl_picker;
 
-use remote::{RemoteConnectionOptions, same_remote_connection_identity};
+use remote::{RemoteConnectionOptions, remote_connection_identity, same_remote_connection_identity};
 pub use remote_connection::{RemoteConnectionModal, connect, connect_with_modal};
 pub use remote_connections::{navigate_to_positions, open_remote_project};
 
 use disconnected_overlay::DisconnectedOverlay;
+use editor::Editor;
 use fuzzy_nucleo::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -45,15 +47,23 @@ use ui::{
 };
 use util::{ResultExt, paths::PathExt};
 use workspace::{
-    HistoryManager, ModalView, MultiWorkspace, OpenMode, OpenOptions, OpenVisible, RecentWorkspace,
-    SerializedWorkspaceLocation, Workspace, WorkspaceDb, WorkspaceId,
-    notifications::DetachAndPromptErr, with_active_or_new_workspace,
+    HistoryManager, ModalView, MultiWorkspace, OpenMode, OpenOptions, OpenVisible, PathList,
+    ProjectFolder,
+    ProjectFolderAssignment, ProjectFolderId, RecentWorkspace, SerializedWorkspaceLocation,
+    Workspace, WorkspaceDb, WorkspaceId, notifications::DetachAndPromptErr,
+    with_active_or_new_workspace,
 };
 use zed_actions::{OpenDevContainer, OpenRecent, OpenRemote};
 
 actions!(
     recent_projects,
-    [ToggleActionsMenu, RemoveSelected, AddToWorkspace,]
+    [
+        ToggleActionsMenu,
+        RemoveSelected,
+        AddToWorkspace,
+        NewFolder,
+        RenameFolder
+    ]
 );
 
 #[derive(Clone, Debug)]
@@ -94,13 +104,26 @@ enum ProjectPickerEntry {
     /// that project group in the current window, while secondary confirm can move local project
     /// groups to a new window when multiple groups are available.
     ProjectGroup(StringMatch),
-    /// A workspace from the recent-project database's "Recent Projects" section.
+    /// A user-defined named folder that groups recent projects.
+    Folder {
+        folder_id: ProjectFolderId,
+        name: SharedString,
+    },
+    /// A workspace from the recent-project database.
     ///
     /// The match's `candidate_id` indexes into `RecentProjectsDelegate::workspaces`. Confirming
     /// one opens that recent workspace in either the current window or a new window, depending on
     /// whether the picker was invoked for new-window behavior and whether this was a primary or
     /// secondary confirm.
     RecentProject(StringMatch),
+    /// Creates a new user folder. Shown at the end of the modal list.
+    NewFolder,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderEdit {
+    Create,
+    Rename(ProjectFolderId),
 }
 
 fn is_selectable_entry(entry: &ProjectPickerEntry) -> bool {
@@ -108,8 +131,164 @@ fn is_selectable_entry(entry: &ProjectPickerEntry) -> bool {
         entry,
         ProjectPickerEntry::OpenFolder { .. }
             | ProjectPickerEntry::ProjectGroup(_)
+            | ProjectPickerEntry::Folder { .. }
             | ProjectPickerEntry::RecentProject(_)
+            | ProjectPickerEntry::NewFolder
     )
+}
+
+fn recent_project_match(id: usize, matches: &HashMap<usize, StringMatch>) -> StringMatch {
+    matches.get(&id).cloned().unwrap_or(StringMatch {
+        candidate_id: id,
+        score: 0.0,
+        positions: Vec::new(),
+        string: Default::default(),
+    })
+}
+
+fn path_list_search_blob(paths: &PathList) -> String {
+    let mut parts = Vec::new();
+    for path in paths.ordered_paths() {
+        let compact = path.compact();
+        if let Some(name) = compact.file_name() {
+            parts.push(name.to_string_lossy().into_owned());
+        }
+        parts.push(compact.to_string_lossy().into_owned());
+    }
+    parts.join(" ")
+}
+
+fn folder_identity_for_connection(host: Option<&RemoteConnectionOptions>) -> String {
+    host.map(|options| remote_connection_identity(options).persistence_key())
+        .unwrap_or_default()
+}
+
+fn folder_identity_for_group(key: &ProjectGroupKey) -> String {
+    folder_identity_for_connection(key.host().as_ref())
+}
+
+#[derive(Clone, Debug)]
+struct PendingFolderAssign {
+    remote_identity: String,
+    identity_paths: PathList,
+}
+
+impl PendingFolderAssign {
+    fn from_workspace(workspace: &RecentWorkspace) -> Self {
+        Self {
+            remote_identity: workspace.project_folder_identity(),
+            identity_paths: workspace.identity_paths.clone(),
+        }
+    }
+
+    fn from_project_group(key: &ProjectGroupKey) -> Self {
+        Self {
+            remote_identity: folder_identity_for_group(key),
+            identity_paths: key.path_list().clone(),
+        }
+    }
+}
+
+fn populate_move_to_folder_menu(
+    mut menu: ContextMenu,
+    picker_entity: Entity<Picker<RecentProjectsDelegate>>,
+    user_folders: &[ProjectFolder],
+    current_folder_id: Option<ProjectFolderId>,
+    pending: PendingFolderAssign,
+) -> ContextMenu {
+    if user_folders.is_empty() {
+        return menu.entry("New Folder…", None, {
+            let picker_entity = picker_entity.clone();
+            let pending = pending.clone();
+            move |window, cx| {
+                picker_entity.update(cx, |picker, cx| {
+                    picker
+                        .delegate
+                        .start_create_folder(Some(pending.clone()), window, cx);
+                });
+            }
+        });
+    }
+
+    for folder in user_folders {
+        if Some(folder.folder_id) == current_folder_id {
+            continue;
+        }
+        let folder_id = folder.folder_id;
+        let picker_entity = picker_entity.clone();
+        let pending = pending.clone();
+        menu = menu.entry(folder.name.clone(), None, move |window, cx| {
+            picker_entity.update(cx, |picker, cx| {
+                picker.delegate.assign_identity_to_folder(
+                    folder_id,
+                    pending.remote_identity.clone(),
+                    pending.identity_paths.clone(),
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    menu = menu.separator().entry("New Folder…", None, {
+        let picker_entity = picker_entity.clone();
+        let pending = pending.clone();
+        move |window, cx| {
+            picker_entity.update(cx, |picker, cx| {
+                picker
+                    .delegate
+                    .start_create_folder(Some(pending.clone()), window, cx);
+            });
+        }
+    });
+
+    if current_folder_id.is_some() {
+        let picker_entity = picker_entity.clone();
+        menu = menu.entry("Remove from Folder", None, move |window, cx| {
+            picker_entity.update(cx, |picker, cx| {
+                picker.delegate.unassign_identity_from_folder(
+                    pending.remote_identity.clone(),
+                    pending.identity_paths.clone(),
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    menu
+}
+
+fn move_to_folder_popover(
+    id: impl Into<ElementId>,
+    trigger_id: impl Into<ElementId>,
+    menu_handle: PopoverMenuHandle<ContextMenu>,
+    picker_entity: Entity<Picker<RecentProjectsDelegate>>,
+    user_folders: Vec<ProjectFolder>,
+    current_folder_id: Option<ProjectFolderId>,
+    pending: PendingFolderAssign,
+) -> PopoverMenu<ContextMenu> {
+    PopoverMenu::new(id)
+        .with_handle(menu_handle)
+        .trigger(
+            IconButton::new(trigger_id, IconName::FolderAdd)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Move to Folder")),
+        )
+        .menu(move |window, cx| {
+            let picker_entity = picker_entity.clone();
+            let user_folders = user_folders.clone();
+            let pending = pending.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                populate_move_to_folder_menu(
+                    menu,
+                    picker_entity.clone(),
+                    &user_folders,
+                    current_folder_id,
+                    pending.clone(),
+                )
+            }))
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,7 +792,7 @@ impl ModalView for RecentProjects {
         cx: &mut Context<Self>,
     ) -> workspace::DismissDecision {
         let submenu_focused = self.picker.update(cx, |picker, cx| {
-            picker.delegate.actions_menu_handle.is_focused(window, cx)
+            picker.delegate.has_another_open_menu(window, cx)
         });
         workspace::DismissDecision::Dismiss(!submenu_focused)
     }
@@ -665,9 +844,15 @@ impl RecentProjects {
                 .await
                 .log_err()
                 .unwrap_or_default();
+            let folders = db.project_folders().log_err().unwrap_or_default();
+            let assignments = db
+                .project_folder_assignments()
+                .log_err()
+                .unwrap_or_default();
             this.update_in(cx, move |this, window, cx| {
                 this.picker.update(cx, move |picker, cx| {
                     picker.delegate.set_workspaces(workspaces);
+                    picker.delegate.set_folders(folders, assignments);
                     picker.update_matches(picker.query(cx), window, cx)
                 })
             })
@@ -795,6 +980,9 @@ impl RecentProjects {
                 Some(ProjectPickerEntry::RecentProject(_)) => {
                     picker.delegate.delete_recent_project(ix, window, cx);
                 }
+                Some(ProjectPickerEntry::Folder { folder_id, .. }) => {
+                    picker.delegate.delete_user_folder(*folder_id, window, cx);
+                }
                 _ => {}
             }
         });
@@ -823,6 +1011,39 @@ impl RecentProjects {
             }
         });
     }
+
+    fn handle_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker.update(cx, |picker, cx| {
+            picker.delegate.start_create_folder(None, window, cx);
+            let query = picker.query(cx);
+            picker.update_matches(query, window, cx);
+            if let Some(ix) = picker.delegate.filtered_entries.iter().position(|entry| {
+                matches!(entry, ProjectPickerEntry::Folder { folder_id, .. } if folder_id.0 < 0)
+            }) {
+                picker.set_selected_index(ix, None, false, window, cx);
+            }
+        });
+    }
+
+    fn handle_rename_folder(
+        &mut self,
+        _: &RenameFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker.update(cx, |picker, cx| {
+            let ix = picker.delegate.selected_index;
+            if let Some(ProjectPickerEntry::Folder { folder_id, name }) =
+                picker.delegate.filtered_entries.get(ix).cloned()
+            {
+                picker
+                    .delegate
+                    .start_rename_folder(folder_id, name, window, cx);
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+            }
+        });
+    }
 }
 
 impl EventEmitter<DismissEvent> for RecentProjects {}
@@ -840,6 +1061,8 @@ impl Render for RecentProjects {
             .on_action(cx.listener(Self::handle_toggle_open_menu))
             .on_action(cx.listener(Self::handle_remove_selected))
             .on_action(cx.listener(Self::handle_add_to_workspace))
+            .on_action(cx.listener(Self::handle_new_folder))
+            .on_action(cx.listener(Self::handle_rename_folder))
             .child(self.picker.clone())
     }
 }
@@ -849,6 +1072,8 @@ pub struct RecentProjectsDelegate {
     open_folders: Vec<OpenFolderEntry>,
     window_project_groups: Vec<ProjectGroupKey>,
     workspaces: Vec<RecentWorkspace>,
+    folders: Vec<ProjectFolder>,
+    assignments: Vec<ProjectFolderAssignment>,
     filtered_entries: Vec<ProjectPickerEntry>,
     selected_index: usize,
     render_paths: bool,
@@ -857,6 +1082,12 @@ pub struct RecentProjectsDelegate {
     focus_handle: FocusHandle,
     style: ProjectPickerStyle,
     actions_menu_handle: PopoverMenuHandle<ContextMenu>,
+    move_to_folder_menu_handle: PopoverMenuHandle<ContextMenu>,
+    footer_move_to_folder_menu_handle: PopoverMenuHandle<ContextMenu>,
+    folder_name_editor: Option<Entity<Editor>>,
+    folder_edit: Option<FolderEdit>,
+    folder_edit_error: Option<SharedString>,
+    pending_assign_after_create: Option<PendingFolderAssign>,
 }
 
 impl RecentProjectsDelegate {
@@ -874,6 +1105,8 @@ impl RecentProjectsDelegate {
             open_folders,
             window_project_groups,
             workspaces: Vec::new(),
+            folders: Vec::new(),
+            assignments: Vec::new(),
             filtered_entries: Vec::new(),
             selected_index: 0,
             create_new_window,
@@ -882,11 +1115,331 @@ impl RecentProjectsDelegate {
             focus_handle,
             style,
             actions_menu_handle: PopoverMenuHandle::default(),
+            move_to_folder_menu_handle: PopoverMenuHandle::default(),
+            footer_move_to_folder_menu_handle: PopoverMenuHandle::default(),
+            folder_name_editor: None,
+            folder_edit: None,
+            folder_edit_error: None,
+            pending_assign_after_create: None,
         }
     }
 
     pub fn set_workspaces(&mut self, workspaces: Vec<RecentWorkspace>) {
         self.workspaces = workspaces;
+    }
+
+    fn set_folders(
+        &mut self,
+        folders: Vec<ProjectFolder>,
+        assignments: Vec<ProjectFolderAssignment>,
+    ) {
+        self.folders = folders;
+        self.assignments = assignments;
+    }
+
+    fn is_editing_folder(&self, folder_id: ProjectFolderId) -> bool {
+        self.folder_edit == Some(FolderEdit::Rename(folder_id))
+    }
+
+    fn is_creating_folder(&self) -> bool {
+        self.folder_edit == Some(FolderEdit::Create)
+    }
+
+    fn folder_id_for_identity(
+        &self,
+        remote_identity: &str,
+        identity_paths: &PathList,
+    ) -> Option<ProjectFolderId> {
+        self.assignments.iter().find_map(|assignment| {
+            (assignment.remote_identity == remote_identity
+                && assignment.identity_paths == *identity_paths)
+                .then_some(assignment.folder_id)
+        })
+    }
+
+    fn folder_id_for_workspace(&self, workspace: &RecentWorkspace) -> Option<ProjectFolderId> {
+        self.folder_id_for_identity(
+            &workspace.project_folder_identity(),
+            &workspace.identity_paths,
+        )
+    }
+
+    fn folder_id_for_project_group(&self, key: &ProjectGroupKey) -> Option<ProjectFolderId> {
+        self.folder_id_for_identity(&folder_identity_for_group(key), key.path_list())
+    }
+
+    fn selected_folder_assign(&self) -> Option<PendingFolderAssign> {
+        match self.filtered_entries.get(self.selected_index) {
+            Some(ProjectPickerEntry::RecentProject(hit)) => self
+                .workspaces
+                .get(hit.candidate_id)
+                .map(PendingFolderAssign::from_workspace),
+            Some(ProjectPickerEntry::ProjectGroup(hit)) => self
+                .window_project_groups
+                .get(hit.candidate_id)
+                .map(PendingFolderAssign::from_project_group),
+            _ => None,
+        }
+    }
+
+    fn is_draft_folder(&self, folder_id: ProjectFolderId) -> bool {
+        self.is_creating_folder() && folder_id.0 < 0
+    }
+
+    fn ensure_folder_editor(&mut self, window: &mut Window, cx: &mut App) -> Entity<Editor> {
+        self.folder_name_editor
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    let mut editor = Editor::single_line(window, cx);
+                    editor.set_placeholder_text("Folder name", window, cx);
+                    editor
+                })
+            })
+            .clone()
+    }
+
+    fn focus_folder_editor(&self, window: &mut Window, cx: &mut App) {
+        if let Some(editor) = self.folder_name_editor.as_ref() {
+            editor.focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    fn start_create_folder(
+        &mut self,
+        pending_assign: Option<PendingFolderAssign>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        if self.style != ProjectPickerStyle::Modal {
+            return;
+        }
+        self.pending_assign_after_create = pending_assign;
+        self.folder_edit = Some(FolderEdit::Create);
+        self.folder_edit_error = None;
+        self.snap_selection_to_first_non_header_match = false;
+        let editor = self.ensure_folder_editor(window, cx);
+        editor.update(cx, |editor, cx| {
+            editor.set_text("", window, cx);
+            editor.select_all(&editor::actions::SelectAll, window, cx);
+        });
+        if let Some(ix) = self
+            .filtered_entries
+            .iter()
+            .position(|entry| matches!(entry, ProjectPickerEntry::NewFolder))
+        {
+            self.filtered_entries[ix] = ProjectPickerEntry::Folder {
+                folder_id: ProjectFolderId(-1),
+                name: SharedString::from(""),
+            };
+            self.selected_index = ix;
+        } else if !self
+            .filtered_entries
+            .iter()
+            .any(|entry| matches!(entry, ProjectPickerEntry::Folder { folder_id, .. } if folder_id.0 < 0))
+        {
+            self.filtered_entries.push(ProjectPickerEntry::Folder {
+                folder_id: ProjectFolderId(-1),
+                name: SharedString::from(""),
+            });
+            self.selected_index = self.filtered_entries.len().saturating_sub(1);
+        }
+        self.focus_folder_editor(window, cx);
+        cx.notify();
+    }
+
+    fn start_rename_folder(
+        &mut self,
+        folder_id: ProjectFolderId,
+        name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        if self.style != ProjectPickerStyle::Modal || folder_id.0 < 0 {
+            return;
+        }
+        self.pending_assign_after_create = None;
+        self.folder_edit = Some(FolderEdit::Rename(folder_id));
+        self.folder_edit_error = None;
+        self.snap_selection_to_first_non_header_match = false;
+        let editor = self.ensure_folder_editor(window, cx);
+        editor.update(cx, |editor, cx| {
+            editor.set_text(name, window, cx);
+            editor.select_all(&editor::actions::SelectAll, window, cx);
+        });
+        self.focus_folder_editor(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_folder_edit(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        let was_creating = self.is_creating_folder();
+        self.folder_edit = None;
+        self.folder_edit_error = None;
+        self.pending_assign_after_create = None;
+        if was_creating {
+            self.filtered_entries
+                .retain(|entry| !matches!(entry, ProjectPickerEntry::Folder { folder_id, .. } if folder_id.0 < 0));
+            if self.style == ProjectPickerStyle::Modal
+                && !self
+                    .filtered_entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::NewFolder))
+            {
+                self.filtered_entries.push(ProjectPickerEntry::NewFolder);
+            }
+        }
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_folder_edit(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        let Some(edit) = self.folder_edit else {
+            return;
+        };
+        let name = self
+            .folder_name_editor
+            .as_ref()
+            .map(|editor| editor.read(cx).text(cx))
+            .unwrap_or_default();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.cancel_folder_edit(window, cx);
+            return;
+        }
+        if self.folders.iter().any(|folder| {
+            folder.name.eq_ignore_ascii_case(&name)
+                && match edit {
+                    FolderEdit::Create => true,
+                    FolderEdit::Rename(folder_id) => folder.folder_id != folder_id,
+                }
+        }) {
+            self.folder_edit_error =
+                Some(format!("A folder named \"{name}\" already exists").into());
+            cx.notify();
+            return;
+        }
+
+        let db = WorkspaceDb::global(cx);
+        let pending_assign = self.pending_assign_after_create.take();
+        self.folder_edit = None;
+        self.folder_edit_error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match edit {
+                FolderEdit::Create => db.create_project_folder(name).await,
+                FolderEdit::Rename(folder_id) => db.rename_project_folder(folder_id, name).await,
+            };
+            if let (Ok(folder), Some(pending)) = (&result, pending_assign) {
+                db.assign_project_to_folder(
+                    folder.folder_id,
+                    pending.remote_identity,
+                    pending.identity_paths,
+                )
+                .await
+                .log_err();
+            }
+            let folders = db.project_folders().log_err().unwrap_or_default();
+            let assignments = db
+                .project_folder_assignments()
+                .log_err()
+                .unwrap_or_default();
+            this.update_in(cx, |picker, window, cx| {
+                if result.is_err() {
+                    picker.delegate.folder_edit_error = Some("Could not save folder".into());
+                }
+                picker.delegate.set_folders(folders, assignments);
+                picker.delegate.snap_selection_to_first_non_header_match = false;
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+                picker.focus_handle(cx).focus(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn delete_user_folder(
+        &mut self,
+        folder_id: ProjectFolderId,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        if folder_id.0 < 0 {
+            self.cancel_folder_edit(window, cx);
+            return;
+        }
+        let db = WorkspaceDb::global(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            db.delete_project_folder(folder_id).await.log_err();
+            let folders = db.project_folders().log_err().unwrap_or_default();
+            let assignments = db
+                .project_folder_assignments()
+                .log_err()
+                .unwrap_or_default();
+            this.update_in(cx, |picker, window, cx| {
+                picker.delegate.set_folders(folders, assignments);
+                picker.delegate.snap_selection_to_first_non_header_match = false;
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn assign_identity_to_folder(
+        &mut self,
+        folder_id: ProjectFolderId,
+        remote_identity: String,
+        identity_paths: PathList,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let db = WorkspaceDb::global(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            db.assign_project_to_folder(folder_id, remote_identity, identity_paths)
+                .await
+                .log_err();
+            let folders = db.project_folders().log_err().unwrap_or_default();
+            let assignments = db
+                .project_folder_assignments()
+                .log_err()
+                .unwrap_or_default();
+            this.update_in(cx, |picker, window, cx| {
+                picker.delegate.set_folders(folders, assignments);
+                picker.delegate.snap_selection_to_first_non_header_match = false;
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn unassign_identity_from_folder(
+        &mut self,
+        remote_identity: String,
+        identity_paths: PathList,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let db = WorkspaceDb::global(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            db.unassign_project_from_folder(remote_identity, identity_paths)
+                .await
+                .log_err();
+            let folders = db.project_folders().log_err().unwrap_or_default();
+            let assignments = db
+                .project_folder_assignments()
+                .log_err()
+                .unwrap_or_default();
+            this.update_in(cx, |picker, window, cx| {
+                picker.delegate.set_folders(folders, assignments);
+                picker.delegate.snap_selection_to_first_non_header_match = false;
+                let query = picker.query(cx);
+                picker.update_matches(query, window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn filtered_entries_include_remote_project(&self) -> bool {
@@ -897,7 +1450,9 @@ impl RecentProjectsDelegate {
 
     fn entry_is_remote_project(&self, entry: &ProjectPickerEntry) -> bool {
         match entry {
-            ProjectPickerEntry::Header(_) => false,
+            ProjectPickerEntry::Header(_)
+            | ProjectPickerEntry::Folder { .. }
+            | ProjectPickerEntry::NewFolder => false,
             ProjectPickerEntry::OpenFolder { index, .. } => self
                 .open_folders
                 .get(*index)
@@ -945,14 +1500,23 @@ impl PickerDelegate for RecentProjectsDelegate {
     }
 
     fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
-        matches!(
-            self.filtered_entries.get(ix),
-            Some(
-                ProjectPickerEntry::OpenFolder { .. }
-                    | ProjectPickerEntry::ProjectGroup(_)
-                    | ProjectPickerEntry::RecentProject(_)
-            )
-        )
+        self.filtered_entries
+            .get(ix)
+            .is_some_and(is_selectable_entry)
+    }
+
+    fn has_another_open_menu(&self, window: &Window, cx: &App) -> bool {
+        self.actions_menu_handle.is_focused(window, cx)
+            || self.actions_menu_handle.is_deployed()
+            || self.move_to_folder_menu_handle.is_focused(window, cx)
+            || self.move_to_folder_menu_handle.is_deployed()
+            || self.footer_move_to_folder_menu_handle.is_focused(window, cx)
+            || self.footer_move_to_folder_menu_handle.is_deployed()
+            || self.folder_edit.is_some()
+            || self
+                .folder_name_editor
+                .as_ref()
+                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
     }
 
     fn update_matches(
@@ -988,15 +1552,7 @@ impl PickerDelegate for RecentProjectsDelegate {
             .window_project_groups
             .iter()
             .enumerate()
-            .map(|(id, key)| {
-                let combined_string = key
-                    .path_list()
-                    .ordered_paths()
-                    .map(|path| path.compact().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .concat();
-                StringMatchCandidate::new(id, &combined_string)
-            })
+            .map(|(id, key)| StringMatchCandidate::new(id, &path_list_search_blob(key.path_list())))
             .collect();
 
         let project_group_matches = match_strings(
@@ -1007,20 +1563,14 @@ impl PickerDelegate for RecentProjectsDelegate {
             100,
         );
 
-        // Build candidates for recent projects (not current, not sibling, not open folder)
+        // Match every recent workspace, including the currently open one. Assigned
+        // open projects still need to appear under their folder when searching.
         let recent_candidates: Vec<_> = self
             .workspaces
             .iter()
             .enumerate()
-            .filter(|(_, workspace)| self.is_valid_recent_candidate(workspace, cx))
             .map(|(id, workspace)| {
-                let combined_string = workspace
-                    .identity_paths
-                    .ordered_paths()
-                    .map(|path| path.compact().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .concat();
-                StringMatchCandidate::new(id, &combined_string)
+                StringMatchCandidate::new(id, &path_list_search_blob(&workspace.identity_paths))
             })
             .collect();
 
@@ -1055,9 +1605,13 @@ impl PickerDelegate for RecentProjectsDelegate {
         }
 
         let has_projects_to_show = if is_empty_query {
-            !project_group_candidates.is_empty()
+            self.window_project_groups.iter().any(|key| self.folder_id_for_project_group(key).is_none())
         } else {
-            !project_group_matches.is_empty()
+            project_group_matches.iter().any(|m| {
+                self.window_project_groups
+                    .get(m.candidate_id)
+                    .is_some_and(|key| self.folder_id_for_project_group(key).is_none())
+            })
         };
 
         if has_projects_to_show {
@@ -1065,6 +1619,13 @@ impl PickerDelegate for RecentProjectsDelegate {
 
             if is_empty_query {
                 for id in 0..self.window_project_groups.len() {
+                    if self
+                        .window_project_groups
+                        .get(id)
+                        .is_some_and(|key| self.folder_id_for_project_group(key).is_some())
+                    {
+                        continue;
+                    }
                     entries.push(ProjectPickerEntry::ProjectGroup(StringMatch {
                         candidate_id: id,
                         score: 0.0,
@@ -1073,37 +1634,195 @@ impl PickerDelegate for RecentProjectsDelegate {
                     }));
                 }
             } else {
-                for m in project_group_matches {
-                    entries.push(ProjectPickerEntry::ProjectGroup(m));
+                for m in &project_group_matches {
+                    if self
+                        .window_project_groups
+                        .get(m.candidate_id)
+                        .is_some_and(|key| self.folder_id_for_project_group(key).is_some())
+                    {
+                        continue;
+                    }
+                    entries.push(ProjectPickerEntry::ProjectGroup(m.clone()));
                 }
             }
         }
 
-        let has_recent_to_show = if is_empty_query {
-            !recent_candidates.is_empty()
+        let recent_by_id: HashMap<usize, StringMatch> = if is_empty_query {
+            HashMap::default()
         } else {
-            !recent_matches.is_empty()
+            recent_matches
+                .into_iter()
+                .map(|m| (m.candidate_id, m))
+                .collect()
+        };
+        let project_group_by_id: HashMap<usize, StringMatch> = if is_empty_query {
+            HashMap::default()
+        } else {
+            project_group_matches
+                .iter()
+                .cloned()
+                .map(|m| (m.candidate_id, m))
+                .collect()
         };
 
-        if has_recent_to_show {
-            entries.push(ProjectPickerEntry::Header("Recent Projects".into()));
+        let valid_recent_ids: Vec<usize> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, workspace)| self.is_valid_recent_candidate(workspace, cx))
+            .map(|(id, _)| id)
+            .collect();
 
-            if is_empty_query {
-                for (id, workspace) in self.workspaces.iter().enumerate() {
-                    if self.is_valid_recent_candidate(workspace, cx) {
-                        entries.push(ProjectPickerEntry::RecentProject(StringMatch {
-                            candidate_id: id,
-                            score: 0.0,
-                            positions: Vec::new(),
-                            string: Default::default(),
-                        }));
-                    }
-                }
-            } else {
-                for m in recent_matches {
-                    entries.push(ProjectPickerEntry::RecentProject(m));
-                }
+        let matching_recent_ids: HashSet<usize> = if is_empty_query {
+            self.workspaces.iter().enumerate().map(|(id, _)| id).collect()
+        } else {
+            recent_by_id.keys().copied().collect()
+        };
+        let matching_project_group_ids: HashSet<usize> = if is_empty_query {
+            (0..self.window_project_groups.len()).collect()
+        } else {
+            project_group_by_id.keys().copied().collect()
+        };
+
+        let mut assigned_ids: HashSet<usize> = HashSet::default();
+        let mut members_by_folder: HashMap<ProjectFolderId, Vec<(i64, usize)>> = HashMap::default();
+        for assignment in &self.assignments {
+            if let Some(workspace_id) = self.workspaces.iter().enumerate().find_map(|(id, workspace)| {
+                (workspace.project_folder_identity() == assignment.remote_identity
+                    && workspace.identity_paths == assignment.identity_paths)
+                    .then_some(id)
+            }) {
+                assigned_ids.insert(workspace_id);
+                members_by_folder
+                    .entry(assignment.folder_id)
+                    .or_default()
+                    .push((assignment.position, workspace_id));
             }
+        }
+        for members in members_by_folder.values_mut() {
+            members.sort_by_key(|(position, _)| *position);
+        }
+
+        let assigned_window_groups_by_folder: HashMap<ProjectFolderId, Vec<usize>> = {
+            let mut grouped: HashMap<ProjectFolderId, Vec<usize>> = HashMap::default();
+            for (group_ix, key) in self.window_project_groups.iter().enumerate() {
+                let Some(folder_id) = self.folder_id_for_project_group(key) else {
+                    continue;
+                };
+                let represented_by_workspace = self.workspaces.iter().any(|workspace| {
+                    workspace.project_folder_identity() == folder_identity_for_group(key)
+                        && workspace.identity_paths == *key.path_list()
+                });
+                if represented_by_workspace {
+                    continue;
+                }
+                grouped.entry(folder_id).or_default().push(group_ix);
+            }
+            grouped
+        };
+
+        let folder_name_matches: HashSet<ProjectFolderId> = if is_empty_query {
+            HashSet::default()
+        } else {
+            let folder_candidates: Vec<_> = self
+                .folders
+                .iter()
+                .enumerate()
+                .map(|(id, folder)| StringMatchCandidate::new(id, folder.name.as_str()))
+                .collect();
+            match_strings(
+                &folder_candidates,
+                query,
+                case,
+                fuzzy_nucleo::LengthPenalty::On,
+                100,
+            )
+            .into_iter()
+            .filter_map(|m| self.folders.get(m.candidate_id).map(|folder| folder.folder_id))
+            .collect()
+        };
+
+        for folder in &self.folders {
+            let members = members_by_folder
+                .get(&folder.folder_id)
+                .cloned()
+                .unwrap_or_default();
+            let window_group_members = assigned_window_groups_by_folder
+                .get(&folder.folder_id)
+                .cloned()
+                .unwrap_or_default();
+            let folder_name_matched =
+                is_empty_query || folder_name_matches.contains(&folder.folder_id);
+            let visible_members: Vec<usize> = members
+                .into_iter()
+                .map(|(_, workspace_id)| workspace_id)
+                .filter(|workspace_id| {
+                    is_empty_query
+                        || folder_name_matched
+                        || matching_recent_ids.contains(workspace_id)
+                })
+                .collect();
+            let visible_window_groups: Vec<usize> = window_group_members
+                .into_iter()
+                .filter(|group_ix| {
+                    is_empty_query
+                        || folder_name_matched
+                        || matching_project_group_ids.contains(group_ix)
+                })
+                .collect();
+
+            if !is_empty_query
+                && visible_members.is_empty()
+                && visible_window_groups.is_empty()
+                && !folder_name_matched
+            {
+                continue;
+            }
+
+            entries.push(ProjectPickerEntry::Folder {
+                folder_id: folder.folder_id,
+                name: folder.name.clone().into(),
+            });
+            for workspace_id in visible_members {
+                entries.push(ProjectPickerEntry::RecentProject(recent_project_match(
+                    workspace_id,
+                    &recent_by_id,
+                )));
+            }
+            for group_ix in visible_window_groups {
+                entries.push(ProjectPickerEntry::ProjectGroup(recent_project_match(
+                    group_ix,
+                    &project_group_by_id,
+                )));
+            }
+        }
+
+        if self.is_creating_folder() {
+            entries.push(ProjectPickerEntry::Folder {
+                folder_id: ProjectFolderId(-1),
+                name: SharedString::from(""),
+            });
+        }
+
+        let ungrouped_ids: Vec<usize> = valid_recent_ids
+            .iter()
+            .copied()
+            .filter(|id| !assigned_ids.contains(id))
+            .filter(|id| is_empty_query || matching_recent_ids.contains(id))
+            .collect();
+
+        if !ungrouped_ids.is_empty() {
+            entries.push(ProjectPickerEntry::Header("Ungrouped".into()));
+            for workspace_id in ungrouped_ids {
+                entries.push(ProjectPickerEntry::RecentProject(recent_project_match(
+                    workspace_id,
+                    &recent_by_id,
+                )));
+            }
+        }
+
+        if self.style == ProjectPickerStyle::Modal && is_empty_query && !self.is_creating_folder() {
+            entries.push(ProjectPickerEntry::NewFolder);
         }
 
         self.filtered_entries = entries;
@@ -1203,6 +1922,28 @@ impl PickerDelegate for RecentProjectsDelegate {
                 let candidate_id = selected_match.candidate_id;
                 self.open_recent_projects(candidate_id, secondary, window, cx);
             }
+            Some(ProjectPickerEntry::Folder { folder_id, name }) => {
+                if self.is_creating_folder() || self.is_editing_folder(*folder_id) {
+                    return;
+                }
+                let folder_id = *folder_id;
+                let name = name.clone();
+                if secondary {
+                    self.start_rename_folder(folder_id, name, window, cx);
+                    return;
+                }
+                let child_ix = self.selected_index + 1;
+                match self.filtered_entries.get(child_ix) {
+                    Some(ProjectPickerEntry::RecentProject(_) | ProjectPickerEntry::ProjectGroup(_)) => {
+                        self.selected_index = child_ix;
+                        self.confirm(secondary, window, cx);
+                    }
+                    _ => {}
+                }
+            }
+            Some(ProjectPickerEntry::NewFolder) => {
+                self.start_create_folder(None, window, cx);
+            }
             _ => {}
         }
     }
@@ -1232,6 +1973,127 @@ impl PickerDelegate for RecentProjectsDelegate {
                     .gap_1()
                     .when(ix > 0, |this| this.mt_1().child(Divider::horizontal()))
                     .child(ListSubHeader::new(title.clone()).inset(true))
+                    .into_any_element(),
+            ),
+            ProjectPickerEntry::Folder { folder_id, name } => {
+                let folder_id = *folder_id;
+                let name = name.clone();
+                let editing = self.is_draft_folder(folder_id) || self.is_editing_folder(folder_id);
+                let show_folder_actions = self.style == ProjectPickerStyle::Modal && !editing;
+                let editor = self.folder_name_editor.clone();
+                let error = self.folder_edit_error.clone();
+
+                let secondary_actions = h_flex()
+                    .gap_px()
+                    .child(
+                        IconButton::new(("rename-folder", folder_id.0 as usize), IconName::Pencil)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Rename Folder"))
+                            .on_click({
+                                let name = name.clone();
+                                cx.listener(move |picker, _, window, cx| {
+                                    cx.stop_propagation();
+                                    window.prevent_default();
+                                    picker.delegate.start_rename_folder(
+                                        folder_id,
+                                        name.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                            }),
+                    )
+                    .child(
+                        IconButton::new(("delete-folder", folder_id.0 as usize), IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip({
+                                let focus_handle = self.focus_handle.clone();
+                                move |_, cx| {
+                                    Tooltip::for_action_in(
+                                        "Remove Folder",
+                                        &RemoveSelected,
+                                        &focus_handle,
+                                        cx,
+                                    )
+                                }
+                            })
+                            .on_click(cx.listener(move |picker, _, window, cx| {
+                                cx.stop_propagation();
+                                window.prevent_default();
+                                picker.delegate.delete_user_folder(folder_id, window, cx);
+                            })),
+                    );
+
+                Some(
+                    v_flex()
+                        .w_full()
+                        .when(ix > 0, |this| this.mt_1().child(Divider::horizontal()))
+                        .child(
+                            ListItem::new(ix)
+                                .toggle_state(selected)
+                                .inset(true)
+                                .spacing(ListItemSpacing::Sparse)
+                                .child(if editing {
+                                    v_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .capture_action(cx.listener(
+                                            |picker, _: &menu::Confirm, window, cx| {
+                                                picker.delegate.commit_folder_edit(window, cx);
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |picker, _: &editor::actions::Newline, window, cx| {
+                                                picker.delegate.commit_folder_edit(window, cx);
+                                            },
+                                        ))
+                                        .capture_action(cx.listener(
+                                            |picker, _: &editor::actions::Cancel, window, cx| {
+                                                picker.delegate.cancel_folder_edit(window, cx);
+                                            },
+                                        ))
+                                        .children(editor)
+                                        .when_some(error, |this, error| {
+                                            this.child(
+                                                Label::new(error)
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Error),
+                                            )
+                                        })
+                                        .into_any_element()
+                                } else {
+                                    Label::new(name)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .into_any_element()
+                                })
+                                .when(show_folder_actions, |this| {
+                                    this.end_slot(secondary_actions)
+                                        .when(!selected, |this| this.show_end_slot_on_hover())
+                                }),
+                        )
+                        .into_any_element(),
+                )
+            }
+            ProjectPickerEntry::NewFolder => Some(
+                ListItem::new(ix)
+                    .toggle_state(selected)
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::Plus)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new("New Folder")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
                     .into_any_element(),
             ),
             ProjectPickerEntry::OpenFolder { index, positions } => {
@@ -1340,7 +2202,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                                 }),
                         )
                         .end_slot(secondary_actions)
-                        .show_end_slot_on_hover()
+                        .when(!selected, |this| this.show_end_slot_on_hover())
                         .into_any_element(),
                 )
             }
@@ -1378,8 +2240,25 @@ impl PickerDelegate for RecentProjectsDelegate {
                 let project_group_key = key.clone();
                 let is_local = key.host().is_none();
                 let has_multiple_groups = self.window_project_groups.len() >= 2;
+                let show_move_to_folder = self.style == ProjectPickerStyle::Modal;
+                let pending_assign = PendingFolderAssign::from_project_group(key);
+                let current_folder_id = self.folder_id_for_project_group(key);
+                let user_folders = self.folders.clone();
+                let move_to_folder_menu_handle = self.move_to_folder_menu_handle.clone();
+                let group_index = hit.candidate_id;
                 let secondary_actions = h_flex()
                     .gap_0p5()
+                    .when(show_move_to_folder, |this| {
+                        this.child(move_to_folder_popover(
+                            ("move-to-folder-group", group_index),
+                            ("move-to-folder-group-trigger", group_index),
+                            move_to_folder_menu_handle,
+                            cx.entity(),
+                            user_folders,
+                            current_folder_id,
+                            pending_assign,
+                        ))
+                    })
                     .when(is_local && has_multiple_groups, |this| {
                         this.child(
                             IconButton::new("move_to_new_window", IconName::ArrowUpRight)
@@ -1464,7 +2343,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                                 .tooltip(Tooltip::text(tooltip_path)),
                         )
                         .end_slot(secondary_actions)
-                        .show_end_slot_on_hover()
+                        .when(!selected, |this| this.show_end_slot_on_hover())
                         .into_any_element(),
                 )
             }
@@ -1540,6 +2419,13 @@ impl PickerDelegate for RecentProjectsDelegate {
                     IconName::ArrowUpRight
                 };
 
+                let workspace_index = hit.candidate_id;
+                let current_folder_id = self.folder_id_for_workspace(workspace);
+                let user_folders = self.folders.clone();
+                let show_move_to_folder = self.style == ProjectPickerStyle::Modal;
+                let move_to_folder_menu_handle = self.move_to_folder_menu_handle.clone();
+                let pending_assign = PendingFolderAssign::from_workspace(workspace);
+
                 let secondary_actions = h_flex()
                     .gap_px()
                     .when(is_local, |this| {
@@ -1571,6 +2457,17 @@ impl PickerDelegate for RecentProjectsDelegate {
                                     })
                                 }),
                         )
+                    })
+                    .when(show_move_to_folder, |this| {
+                        this.child(move_to_folder_popover(
+                            ("move-to-folder", workspace_index),
+                            ("move-to-folder-trigger", workspace_index),
+                            move_to_folder_menu_handle,
+                            cx.entity(),
+                            user_folders,
+                            current_folder_id,
+                            pending_assign,
+                        ))
                     })
                     .child(
                         IconButton::new("alternate_open", secondary_confirm_icon)
@@ -1652,7 +2549,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                                 }),
                         )
                         .end_slot(secondary_actions)
-                        .show_end_slot_on_hover()
+                        .when(!selected, |this| this.show_end_slot_on_hover())
                         .into_any_element(),
                 )
             }
@@ -1666,6 +2563,10 @@ impl PickerDelegate for RecentProjectsDelegate {
         let is_already_open_entry = matches!(
             self.filtered_entries.get(self.selected_index),
             Some(ProjectPickerEntry::OpenFolder { .. } | ProjectPickerEntry::ProjectGroup(_))
+        );
+        let is_folder_management_entry = matches!(
+            self.filtered_entries.get(self.selected_index),
+            Some(ProjectPickerEntry::Folder { .. } | ProjectPickerEntry::NewFolder)
         );
 
         let show_move_to_new_window = match self.filtered_entries.get(self.selected_index) {
@@ -1751,6 +2652,10 @@ impl PickerDelegate for RecentProjectsDelegate {
         }
 
         let selected_entry = self.filtered_entries.get(self.selected_index);
+        let selected_folder_assign = self.selected_folder_assign();
+        let selected_current_folder_id = selected_folder_assign.as_ref().and_then(|pending| {
+            self.folder_id_for_identity(&pending.remote_identity, &pending.identity_paths)
+        });
 
         let is_current_workspace_entry =
             if let Some(ProjectPickerEntry::ProjectGroup(hit)) = selected_entry {
@@ -1798,6 +2703,33 @@ impl PickerDelegate for RecentProjectsDelegate {
                     })
                     .into_any_element(),
             ),
+            Some(ProjectPickerEntry::Folder { folder_id, .. }) if folder_id.0 >= 0 => Some(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("rename_folder", "Rename")
+                            .key_binding(KeyBinding::for_action_in(
+                                &RenameFolder,
+                                &focus_handle,
+                                cx,
+                            ))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(RenameFolder.boxed_clone(), cx)
+                            }),
+                    )
+                    .child(
+                        Button::new("remove_folder", "Remove Folder")
+                            .key_binding(KeyBinding::for_action_in(
+                                &RemoveSelected,
+                                &focus_handle,
+                                cx,
+                            ))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(RemoveSelected.boxed_clone(), cx)
+                            }),
+                    )
+                    .into_any_element(),
+            ),
             _ => None,
         };
 
@@ -1809,11 +2741,45 @@ impl PickerDelegate for RecentProjectsDelegate {
                 .justify_end()
                 .border_t_1()
                 .border_color(cx.theme().colors().border_variant)
+                .when_some(
+                    (self.style == ProjectPickerStyle::Modal)
+                        .then(|| selected_folder_assign.clone())
+                        .flatten()
+                        .map(|pending| {
+                            let current_folder_id = selected_current_folder_id;
+                            let user_folders = self.folders.clone();
+                            let picker_entity = cx.entity();
+                            PopoverMenu::new("footer-move-to-folder")
+                                .with_handle(self.footer_move_to_folder_menu_handle.clone())
+                                .trigger(Button::new(
+                                    "footer-move-to-folder-trigger",
+                                    "Move to Folder",
+                                ))
+                                .menu(move |window, cx| {
+                                    let picker_entity = picker_entity.clone();
+                                    let user_folders = user_folders.clone();
+                                    let pending = pending.clone();
+                                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                                        populate_move_to_folder_menu(
+                                            menu,
+                                            picker_entity.clone(),
+                                            &user_folders,
+                                            current_folder_id,
+                                            pending.clone(),
+                                        )
+                                    }))
+                                })
+                                .into_any_element()
+                        }),
+                    |this, actions| this.child(actions),
+                )
                 .when_some(secondary_footer_actions, |this, actions| {
                     this.child(actions)
                 })
                 .map(|this| {
-                    if is_already_open_entry {
+                    if is_folder_management_entry {
+                        this
+                    } else if is_already_open_entry {
                         this.when(show_move_to_new_window, |this| {
                             this.child({
                                 let window_project_groups = self.window_project_groups.clone();
@@ -1935,14 +2901,54 @@ impl PickerDelegate for RecentProjectsDelegate {
                                     .unwrap_or(false),
                                 _ => false,
                             };
+                            let selected_folder_assign = selected_folder_assign.clone();
+                            let current_folder_id = selected_current_folder_id;
+                            let user_folders = self.folders.clone();
+                            let show_rename_folder = matches!(
+                                selected_entry,
+                                Some(ProjectPickerEntry::Folder { folder_id, .. })
+                                    if folder_id.0 >= 0
+                            );
+                            let picker_entity = cx.entity();
+                            let show_new_folder = self.style == ProjectPickerStyle::Modal;
 
                             move |window, cx| {
                                 Some(ContextMenu::build(window, cx, {
                                     let focus_handle = focus_handle.clone();
                                     let workspace_handle = workspace_handle.clone();
                                     let open_action = open_action.clone();
-                                    move |menu, _, _| {
-                                        menu.context(focus_handle)
+                                    let picker_entity = picker_entity.clone();
+                                    let user_folders = user_folders.clone();
+                                    let selected_folder_assign = selected_folder_assign.clone();
+                                    move |mut menu, _, _| {
+                                        menu = menu.context(focus_handle);
+                                        if show_new_folder {
+                                            menu = menu.action("New Folder…", NewFolder.boxed_clone());
+                                        }
+                                        if let Some(pending) = selected_folder_assign.clone() {
+                                            if show_new_folder {
+                                                menu = menu.submenu("Move to Folder", {
+                                                    let picker_entity = picker_entity.clone();
+                                                    let user_folders = user_folders.clone();
+                                                    move |menu, _, _| {
+                                                        populate_move_to_folder_menu(
+                                                            menu,
+                                                            picker_entity.clone(),
+                                                            &user_folders,
+                                                            current_folder_id,
+                                                            pending.clone(),
+                                                        )
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        if show_rename_folder {
+                                            menu = menu.action(
+                                                "Rename Folder",
+                                                RenameFolder.boxed_clone(),
+                                            );
+                                        }
+                                        menu.when(show_new_folder, |menu| menu.separator())
                                             .when(show_add_to_workspace, |menu| {
                                                 menu.action(
                                                     "Add Folder to this Project",
@@ -2502,8 +3508,9 @@ mod tests {
     //   [3] Header("This Window")
     //   [4] ProjectGroup(0)
     //   [5] ProjectGroup(1)
-    //   [6] Header("Recent Projects")
+    //   [6] Header("Ungrouped")
     //   [7..=26] RecentProject(0..=19)
+    //   [27] NewFolder
     //
     const RECENT_PROJECT_COUNT: usize = 20;
     const FIRST_RECENT_PROJECT: usize = 7;
@@ -2626,26 +3633,6 @@ mod tests {
                 picker.logical_scroll_top_index(),
                 expected,
                 "scroll top should remain at {expected} ({phase})"
-            );
-            assert_selected_entry_is_recent_project(picker);
-        });
-    }
-
-    #[track_caller]
-    fn assert_pinned_to_bottom(
-        picker: &Entity<Picker<RecentProjectsDelegate>>,
-        cx: &mut VisualTestContext,
-        phase: &str,
-    ) {
-        picker.update(cx, |picker, _| {
-            assert_eq!(
-                picker.is_scrolled_to_end(),
-                Some(true),
-                "picker should remain pinned to the bottom ({phase})"
-            );
-            assert!(
-                picker.logical_scroll_top_index() > 0,
-                "picker should not jump to the top while pinned to the bottom ({phase})"
             );
             assert_selected_entry_is_recent_project(picker);
         });
@@ -2789,7 +3776,7 @@ mod tests {
     fn deleting_last_recent_project_preserves_scroll_position(cx: &mut TestAppContext) {
         let target = LAST_RECENT_PROJECT;
         let (picker, cx) = build_picker(cx);
-        scroll_to_and_select(&picker, cx, target);
+        scroll_to_and_select(&picker, cx, target + 1);
 
         picker.update(cx, |picker, _| {
             assert_eq!(
@@ -2800,10 +3787,340 @@ mod tests {
         });
 
         delete_recent_project_in_picker(&picker, cx, target);
-        assert_pinned_to_bottom(&picker, cx, "after delete");
+        picker.update(cx, |picker, _| {
+            assert_eq!(
+                picker.is_scrolled_to_end(),
+                Some(true),
+                "picker should remain pinned to the bottom (after delete)"
+            );
+        });
 
         draw(cx);
-        assert_pinned_to_bottom(&picker, cx, "after redraw");
+        picker.update(cx, |picker, _| {
+            assert_eq!(
+                picker.is_scrolled_to_end(),
+                Some(true),
+                "picker should remain pinned to the bottom (after redraw)"
+            );
+        });
+    }
+
+    fn assign_first_recent_to_folder(
+        picker: &Entity<Picker<RecentProjectsDelegate>>,
+        cx: &mut VisualTestContext,
+        folder_name: &str,
+    ) -> ProjectFolderId {
+        picker.update_in(cx, |picker, window, cx| {
+            let workspace = picker.delegate.workspaces[0].clone();
+            let folder_id = ProjectFolderId(1);
+            picker.delegate.set_folders(
+                vec![ProjectFolder {
+                    folder_id,
+                    name: folder_name.to_string(),
+                    position: 0,
+                }],
+                vec![ProjectFolderAssignment {
+                    folder_id,
+                    remote_identity: workspace.project_folder_identity(),
+                    identity_paths: workspace.identity_paths.clone(),
+                    position: 0,
+                }],
+            );
+            picker.delegate.snap_selection_to_first_non_header_match = false;
+            let query = picker.query(cx);
+            picker.update_matches(query, window, cx);
+            folder_id
+        })
+    }
+
+    #[gpui::test]
+    fn recent_projects_are_grouped_under_user_folders(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        assign_first_recent_to_folder(&picker, cx, "Work");
+
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            let work_ix = entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work")
+                })
+                .expect("Work folder should be listed");
+            assert!(
+                matches!(
+                    entries.get(work_ix + 1),
+                    Some(ProjectPickerEntry::RecentProject(hit)) if hit.candidate_id == 0
+                ),
+                "assigned project should appear under its folder"
+            );
+            let ungrouped_ix = entries
+                .iter()
+                .position(|entry| matches!(entry, ProjectPickerEntry::Header(title) if title == "Ungrouped"))
+                .expect("Ungrouped section should remain");
+            assert!(work_ix < ungrouped_ix, "folders should appear before Ungrouped");
+            assert!(
+                !entries[ungrouped_ix..]
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::RecentProject(hit) if hit.candidate_id == 0)),
+                "assigned project should not remain in Ungrouped"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::NewFolder)),
+                "modal picker should keep a New Folder row"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn searching_grouped_projects_keeps_folder_headers(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        assign_first_recent_to_folder(&picker, cx, "Work");
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.update_matches("project-00".into(), window, cx);
+        });
+
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            assert!(
+                entries.iter().any(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work")
+                }),
+                "matching a project should still show its folder header"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::RecentProject(hit) if hit.candidate_id == 0)),
+                "matching project should remain visible"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::NewFolder)),
+                "New Folder should be hidden while searching"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_user_folder_returns_projects_to_ungrouped(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        let folder_id = assign_first_recent_to_folder(&picker, cx, "Work");
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.folders.clear();
+            picker.delegate.assignments.clear();
+            picker.delegate.snap_selection_to_first_non_header_match = false;
+            let query = picker.query(cx);
+            picker.update_matches(query, window, cx);
+            let _ = folder_id;
+        });
+
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work"))
+            );
+            let ungrouped_ix = entries
+                .iter()
+                .position(|entry| matches!(entry, ProjectPickerEntry::Header(title) if title == "Ungrouped"))
+                .expect("Ungrouped section should exist");
+            assert!(
+                entries[ungrouped_ix..]
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::RecentProject(hit) if hit.candidate_id == 0)),
+                "unassigned project should return to Ungrouped"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn assigned_open_project_stays_under_folder_not_ungrouped(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        picker.update_in(cx, |picker, window, cx| {
+            let mut workspaces = recent_workspaces();
+            let window_paths = PathList::new(&[PathBuf::from("/this-window/project-0")]);
+            workspaces.push(RecentWorkspace {
+                workspace_id: WorkspaceId::from_i64(99),
+                location: SerializedWorkspaceLocation::Local,
+                paths: window_paths.clone(),
+                identity_paths: window_paths.clone(),
+                timestamp: Utc::now(),
+            });
+            picker.delegate.set_workspaces(workspaces);
+            let folder_id = ProjectFolderId(1);
+            picker.delegate.set_folders(
+                vec![ProjectFolder {
+                    folder_id,
+                    name: "test".into(),
+                    position: 0,
+                }],
+                vec![ProjectFolderAssignment {
+                    folder_id,
+                    remote_identity: String::new(),
+                    identity_paths: window_paths,
+                    position: 0,
+                }],
+            );
+            picker.delegate.snap_selection_to_first_non_header_match = false;
+            picker.update_matches("".into(), window, cx);
+        });
+
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            let folder_ix = entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "test")
+                })
+                .expect("test folder should be listed");
+            assert!(
+                matches!(
+                    entries.get(folder_ix + 1),
+                    Some(ProjectPickerEntry::RecentProject(hit)) if hit.candidate_id == RECENT_PROJECT_COUNT
+                ),
+                "currently open assigned project should appear under its folder"
+            );
+            assert!(
+                !entries.iter().any(|entry| {
+                    matches!(entry, ProjectPickerEntry::ProjectGroup(hit) if hit.candidate_id == 0)
+                }),
+                "assigned This Window project should not stay in This Window"
+            );
+            if let Some(ungrouped_ix) = entries.iter().position(|entry| {
+                matches!(entry, ProjectPickerEntry::Header(title) if title == "Ungrouped")
+            }) {
+                assert!(
+                    !entries[ungrouped_ix..].iter().any(|entry| {
+                        matches!(
+                            entry,
+                            ProjectPickerEntry::RecentProject(hit)
+                                if hit.candidate_id == RECENT_PROJECT_COUNT
+                        )
+                    }),
+                    "assigned project should not remain in Ungrouped"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn assigned_this_window_project_appears_under_folder(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        picker.update_in(cx, |picker, window, cx| {
+            let folder_id = ProjectFolderId(1);
+            let window_paths = PathList::new(&[PathBuf::from("/this-window/project-0")]);
+            picker.delegate.set_folders(
+                vec![ProjectFolder {
+                    folder_id,
+                    name: "test".into(),
+                    position: 0,
+                }],
+                vec![ProjectFolderAssignment {
+                    folder_id,
+                    remote_identity: String::new(),
+                    identity_paths: window_paths,
+                    position: 0,
+                }],
+            );
+            picker.delegate.snap_selection_to_first_non_header_match = false;
+            picker.update_matches("".into(), window, cx);
+        });
+
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            let folder_ix = entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "test")
+                })
+                .expect("test folder should be listed");
+            assert!(
+                matches!(
+                    entries.get(folder_ix + 1),
+                    Some(ProjectPickerEntry::ProjectGroup(hit)) if hit.candidate_id == 0
+                ),
+                "This Window project should appear under its folder"
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(entry, ProjectPickerEntry::ProjectGroup(hit) if hit.candidate_id == 0)
+                    })
+                    .count(),
+                1,
+                "assigned This Window project should not also remain under This Window"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn searching_matches_folder_names_and_project_basenames(cx: &mut TestAppContext) {
+        let (picker, cx) = build_picker(cx);
+        assign_first_recent_to_folder(&picker, cx, "Work");
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.update_matches("Work".into(), window, cx);
+        });
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            assert!(
+                entries.iter().any(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work")
+                }),
+                "folder name search should show the folder"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::RecentProject(hit) if hit.candidate_id == 0)),
+                "matching a folder name should keep its members visible"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::Header(title) if title == "Ungrouped")),
+                "unrelated Ungrouped recents should be hidden when searching a folder name"
+            );
+        });
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.update_matches("project-00".into(), window, cx);
+        });
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            assert!(
+                entries.iter().any(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work")
+                }),
+                "basename search should still show the parent folder"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, ProjectPickerEntry::RecentProject(hit) if hit.candidate_id == 0)),
+                "basename search should find the assigned project"
+            );
+        });
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.update_matches("no-such-project".into(), window, cx);
+        });
+        picker.update(cx, |picker, _| {
+            let entries = &picker.delegate.filtered_entries;
+            assert!(
+                !entries.iter().any(|entry| {
+                    matches!(entry, ProjectPickerEntry::Folder { name, .. } if name == "Work")
+                }),
+                "unrelated search should hide folders with no matching members"
+            );
+        });
     }
 
     #[gpui::test]
